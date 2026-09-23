@@ -36,6 +36,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
 CHANNEL_LINK_RAW = os.getenv("CHANNEL_LINK", "")
 
+PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "telegram-webhook")
+
 
 def get_channel_id():
     if not CHANNEL_ID_RAW:
@@ -985,7 +989,22 @@ def main():
     print("/accept_started")
     print("🔗 Rejoin mode: one-use direct private invite link")
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{WEBHOOK_PATH}"
+
+        print("🌍 Running in webhook mode...")
+        print(f"🔗 Webhook URL: {webhook_url}")
+
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        print("💻 Running in local polling mode...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
