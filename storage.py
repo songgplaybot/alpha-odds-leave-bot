@@ -1,6 +1,7 @@
 """Durable PostgreSQL storage, with SQLite only for local development."""
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -9,22 +10,37 @@ def now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
+_pool = None
+_pool_lock = threading.Lock()
+
+
+def postgres_pool(url):
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            from psycopg_pool import ConnectionPool
+            _pool = ConnectionPool(
+                url, min_size=1, max_size=4, timeout=12,
+                kwargs={"sslmode": "require", "connect_timeout": 10,
+                        "options": "-c statement_timeout=15000", "prepare_threshold": None},
+                check=ConnectionPool.check_connection,
+            )
+    return _pool
+
+
 @contextmanager
 def connection():
     url = os.getenv('DATABASE_URL', '').strip()
     if url:
-        import psycopg
-        # Never fall back to temporary storage if the durable database is unavailable.
-        conn = psycopg.connect(url, sslmode='require', connect_timeout=10,
-                               options='-c statement_timeout=15000', prepare_threshold=None)
-        placeholder = '%s'
-    else:
-        if os.getenv('RENDER') or os.getenv('RENDER_EXTERNAL_URL'):
-            raise RuntimeError('DATABASE_URL must be configured on Render before deployment.')
-        conn = sqlite3.connect(os.getenv('SQLITE_PATH', 'alpha_odds_bot.db'))
-        placeholder = '?'
+        # Connection errors never fall back to temporary storage.
+        with postgres_pool(url).connection() as conn:
+            yield conn, '%s'
+        return
+    if os.getenv('RENDER') or os.getenv('RENDER_EXTERNAL_URL'):
+        raise RuntimeError('DATABASE_URL must be configured on Render before deployment.')
+    conn = sqlite3.connect(os.getenv('SQLITE_PATH', 'alpha_odds_bot.db'))
     try:
-        yield conn, placeholder
+        yield conn, '?'
         conn.commit()
     except BaseException:
         conn.rollback()

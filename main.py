@@ -80,10 +80,24 @@ CHANNEL_LINK = clean_channel_link(CHANNEL_LINK_RAW)
 # DATABASE SETUP
 # =========================
 
-from storage import (
-    init_db, save_user, save_join_request, get_pending_requests,
-    get_started_pending_requests, mark_request_approved, mark_request_resolved,
-)
+import storage
+from storage import init_db
+
+
+def async_storage(function):
+    async def call(*args, **kwargs):
+        return await asyncio.to_thread(function, *args, **kwargs)
+    return call
+
+
+save_user = async_storage(storage.save_user)
+save_join_request = async_storage(storage.save_join_request)
+get_pending_requests = async_storage(storage.get_pending_requests)
+get_started_pending_requests = async_storage(storage.get_started_pending_requests)
+mark_request_approved = async_storage(storage.mark_request_approved)
+mark_request_resolved = async_storage(storage.mark_request_resolved)
+_approval_lock = asyncio.Lock()
+
 
 
 # =========================
@@ -152,26 +166,7 @@ def is_current_member(member):
 
 
 async def build_requests_message(context):
-    unchecked = 0
-    # Checking membership never approves or rejects a request.
-    for row in get_pending_requests():
-        try:
-            try:
-                member = await context.bot.get_chat_member(CHANNEL_ID, row[0])
-            except RetryAfter as error:
-                delay = error.retry_after
-                if hasattr(delay, "total_seconds"):
-                    delay = delay.total_seconds()
-                await asyncio.sleep(delay)
-                member = await context.bot.get_chat_member(CHANNEL_ID, row[0])
-            if is_current_member(member):
-                mark_request_approved(row[0])
-        except TelegramError:
-            # Network/permission errors do not prove a request is missing.
-            unchecked += 1
-        await asyncio.sleep(0.05)
-
-    pending = get_pending_requests()
+    pending = await get_pending_requests()
     message = f"📌 Saved pending requests: {len(pending)}\n"
     if not pending:
         return message + "\nNo saved pending requests."
@@ -185,9 +180,7 @@ async def build_requests_message(context):
     if len(pending) > 5:
         message += f"\n…and {len(pending) - 5} more."
     message += "\n\n✅ Started bot · ⏳ Not started"
-    message += "\nAlready joined users are removed. Withdrawn requests can only be confirmed during approval."
-    if unchecked:
-        message += f"\n⚠️ Could not check {unchecked} user(s); their records were kept."
+    message += "\nResolved requests are removed during approval or when users join."
     return message
 
 
@@ -209,17 +202,24 @@ async def approve_one_request(context, request_user_id):
         )
     except TelegramError as error:
         if is_already_participant_error(error):
-            mark_request_approved(request_user_id)
+            await mark_request_approved(request_user_id)
             return "already_inside"
         if is_missing_request_error(error):
-            mark_request_resolved(request_user_id, "resolved")
+            await mark_request_resolved(request_user_id, "resolved")
             return "resolved"
         raise
-    mark_request_approved(request_user_id)
+    await mark_request_approved(request_user_id)
     return "approved"
 
 
 async def approve_request_rows(context, rows, title):
+    if _approval_lock.locked():
+        return "⏳ Approval is already running. Please wait for the final result."
+    async with _approval_lock:
+        return await _approve_request_rows(context, rows, title)
+
+
+async def _approve_request_rows(context, rows, title):
     counts = {"approved": 0, "already_inside": 0, "resolved": 0, "failed": 0}
     errors = []
     for row in rows:
@@ -236,14 +236,19 @@ async def approve_request_rows(context, rows, title):
         except TelegramError as error:
             counts["failed"] += 1
             errors.append(f"User {row[0]}: {error}")
-        await asyncio.sleep(0.3)
+        except Exception as error:
+            # A transient storage failure must not silently abort the entire batch.
+            counts["failed"] += 1
+            errors.append(f"User {row[0]}: temporary storage error; retry this request.")
+            print(f"Approval storage failure: {type(error).__name__}", flush=True)
+        await asyncio.sleep(0.1)
     message = (
         f"✅ {title} finished.\n\n"
         f"Approved now: {counts['approved']}\n"
         f"Already inside: {counts['already_inside']}\n"
         f"No longer pending: {counts['resolved']}\n"
         f"Failed (kept for retry): {counts['failed']}\n"
-        f"Saved pending remaining: {len(get_pending_requests())}"
+        f"Saved pending remaining: {len(await get_pending_requests())}"
     )
     if errors:
         message += "\n\nFirst errors:\n" + "\n".join(errors[:3])[:1800]
@@ -268,7 +273,7 @@ async def setup_bot_commands(app):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    save_user(user)
+    await save_user(user)
 
     if is_admin(user.id):
         await update.message.reply_text(
@@ -368,7 +373,7 @@ async def accept_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except TelegramError as e:
         if is_already_participant_error(e):
-            mark_request_approved(request_user_id)
+            await mark_request_approved(request_user_id)
 
             await update.message.reply_text(
                 f"ℹ️ User is already inside the channel.\n"
@@ -390,7 +395,7 @@ async def accept_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ You are not allowed to use this command.")
         return
 
-    pending = get_pending_requests()
+    pending = await get_pending_requests()
 
     if not pending:
         await update.message.reply_text(
@@ -422,8 +427,8 @@ async def accept_started_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ You are not allowed to use this command.")
         return
 
-    started_pending = get_started_pending_requests()
-    all_pending = get_pending_requests()
+    started_pending = await get_started_pending_requests()
+    all_pending = await get_pending_requests()
 
     not_started_count = len(all_pending) - len(started_pending)
 
@@ -473,8 +478,8 @@ async def admin_text_button_handler(update: Update, context: ContextTypes.DEFAUL
         )
 
     elif text == "✅ Accept Started":
-        started_pending = get_started_pending_requests()
-        all_pending = get_pending_requests()
+        started_pending = await get_started_pending_requests()
+        all_pending = await get_pending_requests()
 
         not_started_count = len(all_pending) - len(started_pending)
 
@@ -505,7 +510,7 @@ async def admin_text_button_handler(update: Update, context: ContextTypes.DEFAUL
         )
 
     elif text == "⚠️ Accept All":
-        pending = get_pending_requests()
+        pending = await get_pending_requests()
 
         if not pending:
             await update.message.reply_text(
@@ -581,8 +586,8 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     elif data == "admin_accept_started":
-        started_pending = get_started_pending_requests()
-        all_pending = get_pending_requests()
+        started_pending = await get_started_pending_requests()
+        all_pending = await get_pending_requests()
 
         not_started_count = len(all_pending) - len(started_pending)
 
@@ -613,7 +618,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     elif data == "admin_accept_all":
-        pending = get_pending_requests()
+        pending = await get_pending_requests()
 
         if not pending:
             await query.edit_message_text(
@@ -654,7 +659,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = join_request.from_user
     user_chat_id = getattr(join_request, "user_chat_id", None)
 
-    save_join_request(user, user_chat_id)
+    await save_join_request(user, user_chat_id)
 
     print("\n📌 NEW JOIN REQUEST")
     print(f"User ID: {user.id}")
@@ -713,7 +718,7 @@ async def handle_member_update(update: Update, context: ContextTypes.DEFAULT_TYP
     new_status = member_update.new_chat_member.status
 
     if is_current_member(member_update.new_chat_member):
-        mark_request_approved(member_update.new_chat_member.user.id)
+        await mark_request_approved(member_update.new_chat_member.user.id)
 
     left_statuses = ["left", "kicked"]
 
@@ -788,6 +793,7 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(8)
         .post_init(setup_bot_commands)
         .build()
     )
