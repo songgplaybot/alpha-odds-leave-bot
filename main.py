@@ -222,26 +222,40 @@ async def approve_request_rows(context, rows, title):
 async def _approve_request_rows(context, rows, title):
     counts = {"approved": 0, "already_inside": 0, "resolved": 0, "failed": 0}
     errors = []
-    for row in rows:
+    cooldown_until = 0.0
+    loop = asyncio.get_running_loop()
+
+    async def process(row):
+        nonlocal cooldown_until
         try:
-            try:
-                result = await approve_one_request(context, row[0])
-            except RetryAfter as error:
-                delay = error.retry_after
-                if hasattr(delay, "total_seconds"):
-                    delay = delay.total_seconds()
-                await asyncio.sleep(delay)
-                result = await approve_one_request(context, row[0])
-            counts[result] += 1
+            for attempt in range(3):
+                # A Telegram rate limit pauses every worker, not just one request.
+                while cooldown_until > loop.time():
+                    await asyncio.sleep(cooldown_until - loop.time())
+                try:
+                    result = await approve_one_request(context, row[0])
+                    counts[result] += 1
+                    break
+                except RetryAfter as error:
+                    delay = error.retry_after
+                    if hasattr(delay, "total_seconds"):
+                        delay = delay.total_seconds()
+                    cooldown_until = max(cooldown_until, loop.time() + float(delay))
+                    if attempt == 2:
+                        raise
         except TelegramError as error:
             counts["failed"] += 1
             errors.append(f"User {row[0]}: {error}")
         except Exception as error:
-            # A transient storage failure must not silently abort the entire batch.
             counts["failed"] += 1
             errors.append(f"User {row[0]}: temporary storage error; retry this request.")
             print(f"Approval storage failure: {type(error).__name__}", flush=True)
-        await asyncio.sleep(0.1)
+
+    # Four concurrent approvals fit the database pool and keep API traffic bounded.
+    for offset in range(0, len(rows), 4):
+        await asyncio.gather(*(process(row) for row in rows[offset:offset + 4]))
+        if offset + 4 < len(rows):
+            await asyncio.sleep(0.1)
     message = (
         f"✅ {title} finished.\n\n"
         f"Approved now: {counts['approved']}\n"
