@@ -1,2 +1,3 @@
 python-telegram-bot[webhooks]==20.8
 python-dotenv
+psycopg[binary]==3.2.13

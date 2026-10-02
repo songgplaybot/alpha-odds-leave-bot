@@ -1,6 +1,5 @@
 import os
 import re
-import sqlite3
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
@@ -81,161 +80,10 @@ CHANNEL_LINK = clean_channel_link(CHANNEL_LINK_RAW)
 # DATABASE SETUP
 # =========================
 
-def init_db():
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            started_bot INTEGER DEFAULT 1,
-            created_at TEXT
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS join_requests (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            user_chat_id INTEGER,
-            status TEXT DEFAULT 'pending',
-            requested_at TEXT,
-            approved_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def save_user(user):
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT OR REPLACE INTO users (
-            user_id,
-            username,
-            first_name,
-            last_name,
-            started_bot,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username,
-        user.first_name,
-        user.last_name,
-        1,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def save_join_request(user, user_chat_id):
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT OR REPLACE INTO join_requests (
-            user_id,
-            username,
-            first_name,
-            last_name,
-            user_chat_id,
-            status,
-            requested_at,
-            approved_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username,
-        user.first_name,
-        user.last_name,
-        user_chat_id,
-        "pending",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        None
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_pending_requests():
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            jr.user_id,
-            jr.username,
-            jr.first_name,
-            jr.last_name,
-            CASE
-                WHEN u.user_id IS NOT NULL THEN 1
-                ELSE 0
-            END AS started_bot
-        FROM join_requests jr
-        LEFT JOIN users u ON jr.user_id = u.user_id
-        WHERE jr.status = 'pending'
-        ORDER BY jr.requested_at ASC
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-    return rows
-
-
-def get_started_pending_requests():
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            jr.user_id,
-            jr.username,
-            jr.first_name,
-            jr.last_name
-        FROM join_requests jr
-        INNER JOIN users u ON jr.user_id = u.user_id
-        WHERE jr.status = 'pending'
-        AND u.started_bot = 1
-        ORDER BY jr.requested_at ASC
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-    return rows
-
-
-def mark_request_approved(user_id):
-    conn = sqlite3.connect("alpha_odds_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        UPDATE join_requests
-        SET status = 'approved',
-            approved_at = ?
-        WHERE user_id = ?
-    """, (
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        user_id
-    ))
-
-    conn.commit()
-    conn.close()
+from storage import (
+    init_db, save_user, save_join_request, get_pending_requests,
+    get_started_pending_requests, mark_request_approved, mark_request_resolved,
+)
 
 
 # =========================
@@ -281,15 +129,6 @@ def admin_reply_keyboard():
         resize_keyboard=True,
         is_persistent=True
     )
-
-
-def mark_request_resolved(user_id, status):
-    # Keep the record for history; only pending records are resolved.
-    with sqlite3.connect("alpha_odds_bot.db") as conn:
-        conn.execute(
-            "UPDATE join_requests SET status = ? WHERE user_id = ? AND status = 'pending'",
-            (status, user_id),
-        )
 
 
 def is_missing_request_error(error):
@@ -944,6 +783,7 @@ def main():
         return
 
     init_db()
+    print("✅ Persistent PostgreSQL storage ready." if os.getenv("DATABASE_URL") else "Local SQLite storage ready.")
 
     app = (
         Application.builder()
