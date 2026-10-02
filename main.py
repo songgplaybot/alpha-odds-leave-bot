@@ -251,6 +251,7 @@ def is_already_participant_error(error):
     return (
         "user_already_participant" in error_text
         or "user already participant" in error_text
+        or "user is already a participant" in error_text
     )
 
 
@@ -725,10 +726,14 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data
 
     if data == "admin_requests":
-        await query.edit_message_text(
-            await build_requests_message(context),
-            reply_markup=admin_inline_keyboard()
-        )
+        try:
+            await query.edit_message_text(
+                await build_requests_message(context),
+                reply_markup=admin_inline_keyboard()
+            )
+        except BadRequest as error:
+            if "message is not modified" not in str(error).lower():
+                raise
 
     elif data == "admin_myid":
         await query.edit_message_text(
