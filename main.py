@@ -22,7 +22,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError, Forbidden, RetryAfter
+from telegram.error import TelegramError, Forbidden, RetryAfter, BadRequest
 
 
 # =========================
@@ -282,43 +282,72 @@ def admin_reply_keyboard():
     )
 
 
-def build_requests_message():
-    pending = get_pending_requests()
-
-    if not pending:
-        return (
-            "📌 Pending requests: 0\n\n"
-            "No pending requests saved yet."
+def mark_request_resolved(user_id, status):
+    # Keep the record for history; only pending records are resolved.
+    with sqlite3.connect("alpha_odds_bot.db") as conn:
+        conn.execute(
+            "UPDATE join_requests SET status = ? WHERE user_id = ? AND status = 'pending'",
+            (status, user_id),
         )
 
-    total_pending = len(pending)
-    started_count = sum(1 for row in pending if row[4] == 1)
-    not_started_count = total_pending - started_count
 
-    message = (
-        f"📌 Pending requests: {total_pending}\n"
-        f"✅ Started bot: {started_count}\n"
-        f"⏳ Not started bot: {not_started_count}\n\n"
+def is_missing_request_error(error):
+    if not isinstance(error, BadRequest):
+        return False
+    text = str(error).lower().replace("_", " ")
+    return "hide requester missing" in text or "join request not found" in text
+
+
+def channel_matches(chat):
+    if isinstance(CHANNEL_ID, int):
+        return chat.id == CHANNEL_ID
+    return bool(chat.username and CHANNEL_ID and
+                ("@" + chat.username).lower() == str(CHANNEL_ID).lower())
+
+
+def is_current_member(member):
+    return member.status in ("member", "administrator", "creator") or (
+        member.status == "restricted" and member.is_member
     )
 
-    for row in pending[:20]:
+
+async def build_requests_message(context):
+    unchecked = 0
+    # Checking membership never approves or rejects a request.
+    for row in get_pending_requests():
+        try:
+            try:
+                member = await context.bot.get_chat_member(CHANNEL_ID, row[0])
+            except RetryAfter as error:
+                delay = error.retry_after
+                if hasattr(delay, "total_seconds"):
+                    delay = delay.total_seconds()
+                await asyncio.sleep(delay)
+                member = await context.bot.get_chat_member(CHANNEL_ID, row[0])
+            if is_current_member(member):
+                mark_request_approved(row[0])
+        except TelegramError:
+            # Network/permission errors do not prove a request is missing.
+            unchecked += 1
+        await asyncio.sleep(0.05)
+
+    pending = get_pending_requests()
+    message = f"📌 Saved pending requests: {len(pending)}\n"
+    if not pending:
+        return message + "\nNo saved pending requests."
+    for row in pending[:5]:
         user_id, username, first_name, last_name, started_bot = row
-
-        name = first_name or "Unknown"
-        if last_name:
-            name += f" {last_name}"
-
-        username_text = f"@{username}" if username else "No username"
-        started_text = "✅ Started bot" if started_bot else "⏳ Not started bot"
-
-        message += f"👤 {name}\n"
-        message += f"ID: {user_id}\n"
-        message += f"Username: {username_text}\n"
-        message += f"Status: {started_text}\n\n"
-
-    if len(pending) > 20:
-        message += f"...and {len(pending) - 20} more."
-
+        name = " ".join(part for part in (first_name, last_name) if part) or "Unknown"
+        name = name[:60]
+        label = f"@{username}" if username else str(user_id)
+        marker = "✅" if started_bot else "⏳"
+        message += f"\n{marker} {name} · {label}"
+    if len(pending) > 5:
+        message += f"\n…and {len(pending) - 5} more."
+    message += "\n\n✅ Started bot · ⏳ Not started"
+    message += "\nAlready joined users are removed. Withdrawn requests can only be confirmed during approval."
+    if unchecked:
+        message += f"\n⚠️ Could not check {unchecked} user(s); their records were kept."
     return message
 
 
@@ -334,98 +363,51 @@ async def create_one_use_rejoin_link(context, user_id):
 
 
 async def approve_one_request(context, request_user_id):
-    await context.bot.approve_chat_join_request(
-        chat_id=CHANNEL_ID,
-        user_id=request_user_id
-    )
-
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=CHANNEL_ID, user_id=request_user_id
+        )
+    except TelegramError as error:
+        if is_already_participant_error(error):
+            mark_request_approved(request_user_id)
+            return "already_inside"
+        if is_missing_request_error(error):
+            mark_request_resolved(request_user_id, "resolved")
+            return "resolved"
+        raise
     mark_request_approved(request_user_id)
+    return "approved"
 
 
 async def approve_request_rows(context, rows, title):
-    approved = 0
-    already_inside = 0
-    failed = 0
-    error_messages = []
-
+    counts = {"approved": 0, "already_inside": 0, "resolved": 0, "failed": 0}
+    errors = []
     for row in rows:
-        request_user_id = row[0]
-        username = row[1]
-        first_name = row[2]
-
         try:
-            await approve_one_request(context, request_user_id)
-
-            approved += 1
-            print(f"✅ Approved: {request_user_id}")
-
-            await asyncio.sleep(0.3)
-
-        except RetryAfter as e:
-            print(f"⏳ Rate limited. Waiting {e.retry_after} seconds...")
-            await asyncio.sleep(e.retry_after)
-
             try:
-                await approve_one_request(context, request_user_id)
-
-                approved += 1
-                print(f"✅ Approved after waiting: {request_user_id}")
-
-            except TelegramError as retry_error:
-                if is_already_participant_error(retry_error):
-                    mark_request_approved(request_user_id)
-                    already_inside += 1
-                    print(f"ℹ️ Already inside channel, marked approved: {request_user_id}")
-                else:
-                    failed += 1
-                    name = first_name or "Unknown"
-                    username_text = f"@{username}" if username else "No username"
-
-                    error_text = (
-                        f"❌ Failed: {request_user_id} | {name} | {username_text}\n"
-                        f"Reason: {retry_error}"
-                    )
-
-                    print(error_text)
-                    error_messages.append(error_text)
-
-        except TelegramError as e:
-            if is_already_participant_error(e):
-                mark_request_approved(request_user_id)
-                already_inside += 1
-
-                print(f"ℹ️ Already inside channel, marked approved: {request_user_id}")
-
-                await asyncio.sleep(0.3)
-                continue
-
-            failed += 1
-
-            name = first_name or "Unknown"
-            username_text = f"@{username}" if username else "No username"
-
-            error_text = (
-                f"❌ Failed: {request_user_id} | {name} | {username_text}\n"
-                f"Reason: {e}"
-            )
-
-            print(error_text)
-            error_messages.append(error_text)
-
-            await asyncio.sleep(0.3)
-
-    final_message = (
+                result = await approve_one_request(context, row[0])
+            except RetryAfter as error:
+                delay = error.retry_after
+                if hasattr(delay, "total_seconds"):
+                    delay = delay.total_seconds()
+                await asyncio.sleep(delay)
+                result = await approve_one_request(context, row[0])
+            counts[result] += 1
+        except TelegramError as error:
+            counts["failed"] += 1
+            errors.append(f"User {row[0]}: {error}")
+        await asyncio.sleep(0.3)
+    message = (
         f"✅ {title} finished.\n\n"
-        f"Approved now: {approved}\n"
-        f"Already inside: {already_inside}\n"
-        f"Failed: {failed}"
+        f"Approved now: {counts['approved']}\n"
+        f"Already inside: {counts['already_inside']}\n"
+        f"No longer pending: {counts['resolved']}\n"
+        f"Failed (kept for retry): {counts['failed']}\n"
+        f"Saved pending remaining: {len(get_pending_requests())}"
     )
-
-    if error_messages:
-        final_message += "\n\nFirst errors:\n"
-        final_message += "\n\n".join(error_messages[:5])
-
-    return final_message
+    if errors:
+        message += "\n\nFirst errors:\n" + "\n".join(errors[:3])[:1800]
+    return message
 
 
 async def setup_bot_commands(app):
@@ -505,7 +487,7 @@ async def requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        build_requests_message(),
+        await build_requests_message(context),
         reply_markup=admin_reply_keyboard()
     )
 
@@ -533,10 +515,14 @@ async def accept_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await approve_one_request(context, request_user_id)
-
+        result = await approve_one_request(context, request_user_id)
+        descriptions = {
+            "approved": "✅ Approved user:",
+            "already_inside": "ℹ️ Already inside the channel:",
+            "resolved": "ℹ️ Request no longer pending; saved record resolved:",
+        }
         await update.message.reply_text(
-            f"✅ Approved user:\n{request_user_id}",
+            f"{descriptions[result]}\n{request_user_id}",
             reply_markup=admin_reply_keyboard()
         )
 
@@ -642,7 +628,7 @@ async def admin_text_button_handler(update: Update, context: ContextTypes.DEFAUL
 
     if text in ["📌 Requests", "🔄 Refresh"]:
         await update.message.reply_text(
-            build_requests_message(),
+            await build_requests_message(context),
             reply_markup=admin_reply_keyboard()
         )
 
@@ -740,7 +726,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data == "admin_requests":
         await query.edit_message_text(
-            build_requests_message(),
+            await build_requests_message(context),
             reply_markup=admin_inline_keyboard()
         )
 
@@ -818,6 +804,9 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not join_request:
         return
 
+    if not channel_matches(join_request.chat):
+        return
+
     user = join_request.from_user
     user_chat_id = getattr(join_request, "user_chat_id", None)
 
@@ -873,11 +862,14 @@ async def handle_member_update(update: Update, context: ContextTypes.DEFAULT_TYP
 
     chat = member_update.chat
 
-    if chat.id != CHANNEL_ID:
+    if not channel_matches(chat):
         return
 
     old_status = member_update.old_chat_member.status
     new_status = member_update.new_chat_member.status
+
+    if is_current_member(member_update.new_chat_member):
+        mark_request_approved(member_update.new_chat_member.user.id)
 
     left_statuses = ["left", "kicked"]
 
