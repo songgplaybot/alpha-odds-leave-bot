@@ -698,11 +698,9 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=user_chat_id,
                 text=(
-                    "Welcome to Alpha Odds 🏆\n\n"
-                    "Your request has been received.\n\n"
-                    "Before we approve your request, press the button below and start the bot.\n\n"
-                    "This activates your access and allows us to send you a direct one-use rejoin link "
-                    "if you ever leave the channel."
+                    f"Welcome to Alpha Odds, {user.first_name}! 🏆🔥\n\n"
+                    "Let’s get you ready—tap Start Bot ✅ below to activate your bot access. "
+                    "It only takes a few seconds! 🚀"
                 ),
                 reply_markup=keyboard
             )
