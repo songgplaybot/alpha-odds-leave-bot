@@ -68,7 +68,12 @@ def init_db():
             # These tables contain private bot records, not public API data.
             conn.execute('ALTER TABLE users ENABLE ROW LEVEL SECURITY')
             conn.execute('ALTER TABLE join_requests ENABLE ROW LEVEL SECURITY')
-            conn.execute('REVOKE ALL ON users, join_requests FROM anon, authenticated')
+            # Supabase API roles do not exist on other PostgreSQL providers.
+            for role in ('anon', 'authenticated'):
+                if conn.execute(
+                    'SELECT 1 FROM pg_roles WHERE rolname = %s', (role,)
+                ).fetchone():
+                    conn.execute(f'REVOKE ALL ON users, join_requests FROM {role}')
 
 
 def save_user(user):
