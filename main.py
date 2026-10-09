@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from telegram import (
     Update,
     BotCommand,
+    MenuButtonWebApp,
+    WebAppInfo,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -251,11 +253,12 @@ async def _approve_request_rows(context, rows, title):
             errors.append(f"User {row[0]}: temporary storage error; retry this request.")
             print(f"Approval storage failure: {type(error).__name__}", flush=True)
 
-    # Four concurrent approvals fit the database pool and keep API traffic bounded.
-    for offset in range(0, len(rows), 4):
-        await asyncio.gather(*(process(row) for row in rows[offset:offset + 4]))
-        if offset + 4 < len(rows):
-            await asyncio.sleep(0.1)
+    # Continuous workers avoid waiting for the slowest request in each batch.
+    remaining = iter(rows)
+    async def worker():
+        for row in remaining:
+            await process(row)
+    await asyncio.gather(*(worker() for _ in range(min(8, len(rows)))))
     message = (
         f"✅ {title} finished.\n\n"
         f"Approved now: {counts['approved']}\n"
@@ -278,6 +281,12 @@ async def setup_bot_commands(app):
         BotCommand("accept_all", "Approve all saved requests"),
         BotCommand("myid", "Show your Telegram ID"),
     ])
+
+    if WEBHOOK_URL and WEBHOOK_URL.startswith("https://"):
+        await app.bot.set_chat_menu_button(
+            chat_id=ADMIN_ID,
+            menu_button=MenuButtonWebApp(text="Admin", web_app=WebAppInfo(url=WEBHOOK_URL.rstrip('/') + '/admin')),
+        )
 
 
 # =========================
@@ -850,13 +859,9 @@ def main():
         print("🌍 Running in webhook mode...")
         print(f"🔗 Webhook URL: {webhook_url}")
 
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=WEBHOOK_PATH,
-            webhook_url=webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-        )
+        from miniapp import run_server
+        asyncio.run(run_server(app, BOT_TOKEN, ADMIN_ID, WEBHOOK_URL, WEBHOOK_PATH,
+                               PORT, get_pending_requests, approve_request_rows))
     else:
         print("💻 Running in local polling mode...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
