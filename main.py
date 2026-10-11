@@ -99,6 +99,14 @@ get_started_pending_requests = async_storage(storage.get_started_pending_request
 mark_request_approved = async_storage(storage.mark_request_approved)
 mark_request_resolved = async_storage(storage.mark_request_resolved)
 _approval_lock = asyncio.Lock()
+APPROVAL_WORKERS = 16
+APPROVAL_SECTION_SIZE = 50
+_approval_progress = {"running": False, "section": 0, "sections": 0, "processed": 0, "total": 0,
+                      "workers": APPROVAL_WORKERS, "section_size": APPROVAL_SECTION_SIZE}
+
+
+def approval_progress():
+    return dict(_approval_progress)
 
 
 
@@ -218,10 +226,16 @@ async def approve_request_rows(context, rows, title):
     if _approval_lock.locked():
         return "⏳ Approval is already running. Please wait for the final result."
     async with _approval_lock:
-        return await _approve_request_rows(context, rows, title)
+        try:
+            return await _approve_request_rows(context, rows, title)
+        finally:
+            _approval_progress["running"] = False
 
 
 async def _approve_request_rows(context, rows, title):
+    _approval_progress.update(running=True, section=0,
+                              sections=(len(rows) + APPROVAL_SECTION_SIZE - 1) // APPROVAL_SECTION_SIZE,
+                              processed=0, total=len(rows))
     counts = {"approved": 0, "already_inside": 0, "resolved": 0, "failed": 0}
     errors = []
     cooldown_until = 0.0
@@ -252,13 +266,19 @@ async def _approve_request_rows(context, rows, title):
             counts["failed"] += 1
             errors.append(f"User {row[0]}: temporary storage error; retry this request.")
             print(f"Approval storage failure: {type(error).__name__}", flush=True)
+        finally:
+            _approval_progress["processed"] += 1
 
-    # Continuous workers avoid waiting for the slowest request in each batch.
-    remaining = iter(rows)
-    async def worker():
-        for row in remaining:
-            await process(row)
-    await asyncio.gather(*(worker() for _ in range(min(8, len(rows)))))
+    # Finish each section before moving on; replenish workers immediately within it.
+    for offset in range(0, len(rows), APPROVAL_SECTION_SIZE):
+        _approval_progress["section"] = offset // APPROVAL_SECTION_SIZE + 1
+        remaining = iter(rows[offset:offset + APPROVAL_SECTION_SIZE])
+        async def worker():
+            for row in remaining:
+                await process(row)
+        await asyncio.gather(*(worker() for _ in range(min(APPROVAL_WORKERS, len(rows) - offset))))
+        print(f"Approval section {_approval_progress['section']}/{_approval_progress['sections']} finished "
+              f"({_approval_progress['processed']}/{len(rows)} processed)", flush=True)
     message = (
         f"✅ {title} finished.\n\n"
         f"Approved now: {counts['approved']}\n"
@@ -861,7 +881,7 @@ def main():
 
         from miniapp import run_server
         asyncio.run(run_server(app, BOT_TOKEN, ADMIN_ID, WEBHOOK_URL, WEBHOOK_PATH,
-                               PORT, get_pending_requests, approve_request_rows))
+                               PORT, get_pending_requests, approve_request_rows, approval_progress))
     else:
         print("💻 Running in local polling mode...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -85,8 +85,27 @@ class Approvals(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(task.done())
             release.set()
             result = await task
-        self.assertLessEqual(peak, 8)
+        self.assertEqual(peak, 16)
         self.assertIn('Approved now: 20', result)
+
+    async def test_sections_finish_in_order_and_progress(self):
+        seen = []
+        async def approve(context, uid):
+            if uid >= 50:
+                self.assertEqual(len([i for i in seen if i < 50]), 50)
+            if uid >= 100:
+                self.assertEqual(len([i for i in seen if i < 100]), 100)
+            await asyncio.sleep(.001)
+            seen.append(uid)
+            return 'approved'
+        async def pending(): return []
+        with patch.object(main, 'approve_one_request', approve), patch.object(main, 'get_pending_requests', pending):
+            result = await main.approve_request_rows(None, [(i,) for i in range(123)], 'Approval')
+        self.assertEqual(len(set(seen)), 123)
+        progress = main.approval_progress()
+        self.assertEqual((progress['section'], progress['sections'], progress['processed']), (3, 3, 123))
+        self.assertFalse(progress['running'])
+        self.assertIn('Approved now: 123', result)
 
     async def test_retry_after_keeps_requests(self):
         calls = 0

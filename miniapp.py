@@ -31,7 +31,7 @@ def validate_admin(data, token, admin_id):
         raise ValueError('Unauthorized or expired session')
 
 
-def create_server(bot_app, token, admin_id, webhook_path, pending, approve):
+def create_server(bot_app, token, admin_id, webhook_path, pending, approve, progress=lambda: {}):
     secret = hashlib.sha256(('miniapp-webhook:' + token).encode()).hexdigest()
     job = {'running': False, 'result': ''}
 
@@ -69,7 +69,7 @@ def create_server(bot_app, token, admin_id, webhook_path, pending, approve):
                     bot_app.create_task(run())
                 self.finish({'adminId': admin_id, 'total': len(rows), 'started': sum(bool(r[4]) for r in rows),
                              'requests': [{'id': r[0], 'name': ' '.join(n for n in r[2:4] if n) or str(r[0]),
-                                           'username': r[1], 'started': bool(r[4])} for r in rows], 'job': dict(job)})
+                                           'username': r[1], 'started': bool(r[4])} for r in rows], 'job': dict(job), 'progress': progress()})
             except Exception:
                 raise HTTPError(503, reason='Storage temporarily unavailable')
 
@@ -88,8 +88,8 @@ def create_server(bot_app, token, admin_id, webhook_path, pending, approve):
                         ('/' + webhook_path.strip('/'), Webhook)], debug=False), secret
 
 
-async def run_server(bot_app, token, admin_id, base_url, path, port, pending, approve):
-    web, secret = create_server(bot_app, token, admin_id, path, pending, approve)
+async def run_server(bot_app, token, admin_id, base_url, path, port, pending, approve, progress=lambda: {}):
+    web, secret = create_server(bot_app, token, admin_id, path, pending, approve, progress)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
