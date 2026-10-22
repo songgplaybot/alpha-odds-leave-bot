@@ -20,7 +20,7 @@ def postgres_pool(url):
         if _pool is None:
             from psycopg_pool import ConnectionPool
             _pool = ConnectionPool(
-                url, min_size=1, max_size=4, timeout=12,
+                url, min_size=0, max_size=4, max_idle=60, timeout=12,
                 kwargs={"sslmode": "require", "connect_timeout": 10,
                         "options": "-c statement_timeout=15000", "prepare_threshold": None},
                 check=ConnectionPool.check_connection,

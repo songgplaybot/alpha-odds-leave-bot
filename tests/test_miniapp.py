@@ -6,7 +6,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from urllib.parse import urlencode
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from tornado.testing import AsyncHTTPTestCase
 import miniapp
@@ -31,7 +31,10 @@ class Authentication(unittest.TestCase):
 class Server(AsyncHTTPTestCase):
     def get_app(self):
         self.calls = []
+        self.storage_down = False
         async def pending():
+            if self.storage_down:
+                raise RuntimeError('private database diagnostics')
             return [(1, 'name', 'User', None, 1), (2, None, 'Other', None, 0)]
         async def approve(context, rows, title):
             self.calls.append(rows)
@@ -50,6 +53,14 @@ class Server(AsyncHTTPTestCase):
         self.assertEqual(self.fetch('/hook', method='POST', body='{"update_id":1}', headers={'X-Telegram-Bot-Api-Secret-Token': self.secret}).code, 200)
         self.assertEqual(self.bot_app.update_queue.qsize(), 1)
 
+    def test_storage_failure_returns_actionable_json(self):
+        self.storage_down = True
+        response = self.fetch('/api/admin/state', method='POST', body='',
+                              headers={'X-Telegram-Init-Data': signed()})
+        self.assertEqual(response.code, 503)
+        self.assertIn('database is unavailable', json.loads(response.body)['error'])
+        self.assertNotIn('private database diagnostics', response.body.decode())
+
     def test_duplicate_approval_and_filter(self):
         headers={'X-Telegram-Init-Data': signed()}
         self.fetch('/api/admin/started', method='POST', body='', headers=headers)
@@ -57,6 +68,24 @@ class Server(AsyncHTTPTestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual([r[0] for r in self.calls[0]], [1])
         self.io_loop.run_sync(lambda: asyncio.sleep(.06))
+
+
+class Refresh(unittest.IsolatedAsyncioTestCase):
+    async def test_storage_failure_replies_instead_of_crashing(self):
+        with patch.object(main, 'get_pending_requests', AsyncMock(side_effect=RuntimeError('private details'))):
+            message = await main.build_requests_message(None)
+        self.assertIn('database is unavailable', message)
+        self.assertNotIn('private details', message)
+
+    async def test_unchanged_inline_refresh_has_visible_confirmation(self):
+        query = SimpleNamespace(from_user=SimpleNamespace(id=main.ADMIN_ID), data='admin_requests',
+                                answer=AsyncMock(), edit_message_text=AsyncMock(side_effect=main.BadRequest('Message is not modified')),
+                                message=SimpleNamespace(reply_text=AsyncMock()))
+        with patch.object(main, 'get_pending_requests', AsyncMock(return_value=[])):
+            await main.admin_button_handler(SimpleNamespace(callback_query=query), None)
+        query.answer.assert_awaited_once_with('Refreshing request list…')
+        query.message.reply_text.assert_awaited_once_with('✅ Request list is up to date.')
+        self.assertIn('Refreshed:', query.edit_message_text.call_args.args[0])
 
 
 class Approvals(unittest.IsolatedAsyncioTestCase):

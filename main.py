@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from telegram import (
@@ -176,7 +176,12 @@ def is_current_member(member):
 
 
 async def build_requests_message(context):
-    pending = await get_pending_requests()
+    try:
+        pending = await asyncio.wait_for(get_pending_requests(), timeout=15)
+    except Exception as error:
+        print(f"Request list unavailable: {type(error).__name__}", flush=True)
+        return ("⚠️ The database is unavailable right now. Your request list could not be refreshed."
+                "\nPlease try again after the database connection is restored.")
     message = f"📌 Saved pending requests: {len(pending)}\n"
     if not pending:
         return message + "\nNo saved pending requests."
@@ -608,18 +613,20 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("You are not allowed to use this button.", show_alert=True)
         return
 
-    await query.answer()
+    await query.answer("Refreshing request list…" if query.data == "admin_requests" else None)
 
     data = query.data
 
     if data == "admin_requests":
         try:
             await query.edit_message_text(
-                await build_requests_message(context),
+                (await build_requests_message(context)) + "\n\nRefreshed: " + datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
                 reply_markup=admin_inline_keyboard()
             )
         except BadRequest as error:
-            if "message is not modified" not in str(error).lower():
+            if "message is not modified" in str(error).lower():
+                await query.message.reply_text("✅ Request list is up to date.")
+            else:
                 raise
 
     elif data == "admin_myid":
@@ -828,8 +835,12 @@ def main():
         print("❌ CHANNEL_ID is missing. Add it inside your .env file.")
         return
 
-    init_db()
-    print("✅ Persistent PostgreSQL storage ready." if os.getenv("DATABASE_URL") else "Local SQLite storage ready.")
+    try:
+        init_db()
+        print("✅ Persistent PostgreSQL storage ready." if os.getenv("DATABASE_URL") else "Local SQLite storage ready.")
+    except Exception as error:
+        # Keep admin feedback available during a provider outage; never fall back to temporary data.
+        print(f"⚠️ Database startup check failed: {type(error).__name__}", flush=True)
 
     app = (
         Application.builder()

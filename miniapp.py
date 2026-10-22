@@ -55,7 +55,7 @@ def create_server(bot_app, token, admin_id, webhook_path, pending, approve, prog
             if action not in ('state', 'all', 'started'):
                 raise HTTPError(404)
             try:
-                rows = await pending()
+                rows = await asyncio.wait_for(pending(), timeout=15)
                 if action != 'state' and not job['running']:
                     selected = rows if action == 'all' else [row for row in rows if row[4]]
                     job.update(running=True, result='')
@@ -71,7 +71,8 @@ def create_server(bot_app, token, admin_id, webhook_path, pending, approve, prog
                              'requests': [{'id': r[0], 'name': ' '.join(n for n in r[2:4] if n) or str(r[0]),
                                            'username': r[1], 'started': bool(r[4])} for r in rows], 'job': dict(job), 'progress': progress()})
             except Exception:
-                raise HTTPError(503, reason='Storage temporarily unavailable')
+                self.set_status(503)
+                self.finish({'error': 'The database is unavailable. Please retry after the connection is restored.'})
 
     class Webhook(RequestHandler):
         async def post(self):
