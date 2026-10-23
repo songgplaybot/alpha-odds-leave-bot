@@ -108,14 +108,14 @@ class Approvals(unittest.IsolatedAsyncioTestCase):
             return 'approved'
         async def pending():
             return []
-        with patch.object(main, 'approve_one_request', approve), patch.object(main, 'get_pending_requests', pending):
-            task = asyncio.create_task(main._approve_request_rows(None, [(i,) for i in range(20)], 'Approval'))
+        with patch.object(main, 'approve_request_api', approve), patch.object(main, 'mark_request_results', AsyncMock()), patch.object(main, 'get_pending_requests', pending):
+            task = asyncio.create_task(main._approve_request_rows(None, [(i,) for i in range(40)], 'Approval'))
             await asyncio.wait_for(ninth_started.wait(), 1)
             self.assertFalse(task.done())
             release.set()
             result = await task
-        self.assertEqual(peak, 16)
-        self.assertIn('Approved now: 20', result)
+        self.assertEqual(peak, 32)
+        self.assertIn('Approved now: 40', result)
 
     async def test_sections_finish_in_order_and_progress(self):
         seen = []
@@ -128,13 +128,41 @@ class Approvals(unittest.IsolatedAsyncioTestCase):
             seen.append(uid)
             return 'approved'
         async def pending(): return []
-        with patch.object(main, 'approve_one_request', approve), patch.object(main, 'get_pending_requests', pending):
+        writer = AsyncMock()
+        with patch.object(main, 'approve_request_api', approve), patch.object(main, 'mark_request_results', writer), patch.object(main, 'get_pending_requests', pending):
             result = await main.approve_request_rows(None, [(i,) for i in range(123)], 'Approval')
+        self.assertEqual([len(call.args[0]) for call in writer.call_args_list], [50, 50, 23])
         self.assertEqual(len(set(seen)), 123)
         progress = main.approval_progress()
         self.assertEqual((progress['section'], progress['sections'], progress['processed']), (3, 3, 123))
         self.assertFalse(progress['running'])
         self.assertIn('Approved now: 123', result)
+
+    async def test_batch_commit_failure_keeps_outcomes_for_retry(self):
+        async def pending(): return [(1,), (2,)]
+        writer = AsyncMock(side_effect=RuntimeError('database unavailable'))
+        with patch.object(main, 'approve_request_api', AsyncMock(return_value='approved')), \
+             patch.object(main, 'mark_request_results', writer), patch.object(main, 'get_pending_requests', pending):
+            result = await main.approve_request_rows(None, [(1,), (2,)], 'Approval')
+        self.assertIn('Approved now: 0', result)
+        self.assertIn('Failed (kept for retry): 2', result)
+        self.assertIn('Saved pending remaining: 2', result)
+        writer.assert_awaited_once()
+
+    async def test_rate_limit_pauses_all_workers(self):
+        starts = []
+        async def approve(context, uid):
+            starts.append((uid, asyncio.get_running_loop().time()))
+            if len(starts) == 1:
+                raise main.RetryAfter(.04)
+            return 'approved'
+        writer = AsyncMock()
+        with patch.object(main, 'approve_request_api', approve), patch.object(main, 'mark_request_results', writer), \
+             patch.object(main, 'get_pending_requests', AsyncMock(return_value=[])):
+            result = await main.approve_request_rows(None, [(i,) for i in range(40)], 'Approval')
+        self.assertTrue(all(t - starts[0][1] >= .035 for _, t in starts[1:]))
+        self.assertIn('Approved now: 40', result)
+        self.assertEqual(len(writer.call_args.args[0]), 40)
 
     async def test_retry_after_keeps_requests(self):
         calls = 0
@@ -144,7 +172,7 @@ class Approvals(unittest.IsolatedAsyncioTestCase):
             raise main.RetryAfter(0)
         async def pending():
             return [(1,)]
-        with patch.object(main, 'approve_one_request', approve), patch.object(main, 'get_pending_requests', pending):
+        with patch.object(main, 'approve_request_api', approve), patch.object(main, 'mark_request_results', AsyncMock()), patch.object(main, 'get_pending_requests', pending):
             result = await main._approve_request_rows(None, [(1,)], 'Approval')
         self.assertEqual(calls, 3)
         self.assertIn('Failed (kept for retry): 1', result)

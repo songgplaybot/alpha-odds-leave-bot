@@ -98,8 +98,9 @@ get_pending_requests = async_storage(storage.get_pending_requests)
 get_started_pending_requests = async_storage(storage.get_started_pending_requests)
 mark_request_approved = async_storage(storage.mark_request_approved)
 mark_request_resolved = async_storage(storage.mark_request_resolved)
+mark_request_results = async_storage(storage.mark_request_results)
 _approval_lock = asyncio.Lock()
-APPROVAL_WORKERS = 16
+APPROVAL_WORKERS = 32
 APPROVAL_SECTION_SIZE = 50
 _approval_progress = {"running": False, "section": 0, "sections": 0, "processed": 0, "total": 0,
                       "workers": APPROVAL_WORKERS, "section_size": APPROVAL_SECTION_SIZE}
@@ -210,21 +211,28 @@ async def create_one_use_rejoin_link(context, user_id):
     return invite.invite_link
 
 
-async def approve_one_request(context, request_user_id):
+async def approve_request_api(context, request_user_id):
+    """Classify Telegram's result without waiting for a database round trip."""
     try:
         await context.bot.approve_chat_join_request(
             chat_id=CHANNEL_ID, user_id=request_user_id
         )
     except TelegramError as error:
         if is_already_participant_error(error):
-            await mark_request_approved(request_user_id)
             return "already_inside"
         if is_missing_request_error(error):
-            await mark_request_resolved(request_user_id, "resolved")
             return "resolved"
         raise
-    await mark_request_approved(request_user_id)
     return "approved"
+
+
+async def approve_one_request(context, request_user_id):
+    result = await approve_request_api(context, request_user_id)
+    if result == "resolved":
+        await mark_request_resolved(request_user_id, "resolved")
+    else:
+        await mark_request_approved(request_user_id)
+    return result
 
 
 async def approve_request_rows(context, rows, title):
@@ -244,6 +252,7 @@ async def _approve_request_rows(context, rows, title):
     counts = {"approved": 0, "already_inside": 0, "resolved": 0, "failed": 0}
     errors = []
     cooldown_until = 0.0
+    section_results = []
     loop = asyncio.get_running_loop()
 
     async def process(row):
@@ -254,8 +263,8 @@ async def _approve_request_rows(context, rows, title):
                 while cooldown_until > loop.time():
                     await asyncio.sleep(cooldown_until - loop.time())
                 try:
-                    result = await approve_one_request(context, row[0])
-                    counts[result] += 1
+                    result = await approve_request_api(context, row[0])
+                    section_results.append((row[0], result))
                     break
                 except RetryAfter as error:
                     delay = error.retry_after
@@ -277,11 +286,22 @@ async def _approve_request_rows(context, rows, title):
     # Finish each section before moving on; replenish workers immediately within it.
     for offset in range(0, len(rows), APPROVAL_SECTION_SIZE):
         _approval_progress["section"] = offset // APPROVAL_SECTION_SIZE + 1
+        section_results.clear()
         remaining = iter(rows[offset:offset + APPROVAL_SECTION_SIZE])
         async def worker():
             for row in remaining:
                 await process(row)
         await asyncio.gather(*(worker() for _ in range(min(APPROVAL_WORKERS, len(rows) - offset))))
+        if section_results:
+            try:
+                await mark_request_results(list(section_results))
+            except Exception as error:
+                counts["failed"] += len(section_results)
+                errors.append("Could not save this section. Requests are kept for retry.")
+                print(f"Approval section storage failure: {type(error).__name__}", flush=True)
+            else:
+                for _, result in section_results:
+                    counts[result] += 1
         print(f"Approval section {_approval_progress['section']}/{_approval_progress['sections']} finished "
               f"({_approval_progress['processed']}/{len(rows)} processed)", flush=True)
     message = (

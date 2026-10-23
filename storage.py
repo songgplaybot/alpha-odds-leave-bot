@@ -124,3 +124,31 @@ def mark_request_resolved(user_id, status):
     with connection() as (conn, ph):
         execute(conn, ph, "UPDATE join_requests SET status=? WHERE user_id=? AND status='pending'",
                 (status, user_id))
+
+
+def mark_request_results(results):
+    """Commit one section in one transaction; failed API calls are never included."""
+    statuses = {}
+    for user_id, result in results:
+        if result not in ("approved", "already_inside", "resolved"):
+            raise ValueError("Unsupported approval result")
+        statuses[user_id] = "resolved" if result == "resolved" else "approved"
+    if not statuses:
+        return
+    parameters = []
+    cases = []
+    for user_id, status in statuses.items():
+        cases.append("WHEN ? THEN ?")
+        parameters.extend((user_id, status))
+    approved = [user_id for user_id, status in statuses.items() if status == "approved"]
+    timestamp_sql = "approved_at"
+    if approved:
+        timestamp_sql = "CASE WHEN user_id IN (" + ",".join("?" for _ in approved) + ") THEN ? ELSE approved_at END"
+        parameters.extend(approved)
+        parameters.append(now())
+    ids_sql = ",".join("?" for _ in statuses)
+    parameters.extend(statuses)
+    with connection() as (conn, ph):
+        execute(conn, ph, "UPDATE join_requests SET status=CASE user_id " + " ".join(cases) +
+                " ELSE status END, approved_at=" + timestamp_sql +
+                " WHERE status='pending' AND user_id IN (" + ids_sql + ")", parameters)
