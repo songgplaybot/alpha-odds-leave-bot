@@ -42,6 +42,10 @@ def create_server(bot_app, token, admin_id, webhook_path, pending, approve, prog
             self.finish(Path(__file__).with_name('miniapp.html').read_text())
 
     class Health(RequestHandler):
+        def head(self):
+            self.set_status(200)
+            self.finish()
+
         def get(self):
             self.finish({'status': 'ok'})
 

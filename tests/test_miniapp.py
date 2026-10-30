@@ -45,6 +45,9 @@ class Server(AsyncHTTPTestCase):
         return web
 
     def test_auth_and_page(self):
+        health = self.fetch('/', method='HEAD')
+        self.assertEqual(health.code, 200)
+        self.assertEqual(health.body, b'')
         self.assertEqual(self.fetch('/admin').code, 200)
         self.assertEqual(self.fetch('/api/admin/state', method='POST', body='').code, 403)
         response = self.fetch('/api/admin/state', method='POST', body='', headers={'X-Telegram-Init-Data': signed()})
