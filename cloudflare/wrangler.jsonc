@@ -1,0 +1,55 @@
+{
+  "name": "alpha-odds-leave-bot",
+  "main": "src/worker.js",
+  "account_id": "c328b75ae4532adb6e597dc95d75addf",
+  "compatibility_date": "2026-11-04",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": true,
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.html"
+      ],
+      "fallthrough": true
+    }
+  ],
+  "vars": {
+    "BOT_USERNAME": "Alphaoddsleavebot",
+    "PUBLIC_URL": "https://alpha-odds-leave-bot.nichienicholas1.workers.dev"
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "APPROVAL_QUEUE",
+        "queue": "alpha-odds-approvals"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "alpha-odds-approvals",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 100,
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "bc96fb9502d84a21a01e6b0a2a63ccb7"
+    }
+  ]
+}

@@ -3,3 +3,7 @@ venv/
 __pycache__/
 *.pyc
 alpha_odds_bot.db
+node_modules/
+.wrangler/
+.dev.vars
+cloudflare/dist/
