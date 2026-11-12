@@ -1,6 +1,6 @@
 import adminHtml from '../../miniapp.html';
 import {connect,pending,saveUser,saveJoin,markMember,markResults,latestJob,state,createJob} from './db.js';
-import {WORKERS,SECTION_SIZE,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
+import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
 async function withDb(env,fn){const db=await connect(env);try{return await fn(db);}finally{await db.end();}}
@@ -73,8 +73,7 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
  if(!job){const current=(await db.query('SELECT status,lease_until,not_before FROM cf_approval_jobs WHERE id=$1',[id])).rows[0];
   if(current?.status==='running')return {retry:Math.max(2,Math.ceil((Math.max(new Date(current.lease_until||0),new Date(current.not_before||0))-Date.now())/1000))};return {done:true};}
  try{
-  const processed=Object.values(job.counts).reduce((a,b)=>a+b,0);
-  const chunk=job.pending_ids.slice(0,Math.min(WORKERS,SECTION_SIZE-(processed%SECTION_SIZE)));
+  const chunk = job.pending_ids.slice(0, WORKERS);
   const {results,cooldown}=await approveChunk(chunk,api,env.CHANNEL_ID);
   const retries=results.filter(r=>r.result==='retry');const finished=results.filter(r=>r.result!=='retry');
   for(const r of finished){job.counts[r.result]++;if(r.result==='failed'&&job.errors.length<3)job.errors.push(`User ${r.id}: ${r.error}`);}
@@ -85,8 +84,11 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   try{
    const owned=(await db.query('SELECT id FROM cf_approval_jobs WHERE id=$1 AND lease_id=$2 FOR UPDATE',[id,lease])).rowCount;if(!owned)throw Error('Approval lease changed');
    await markResults(db,finished);
-   const remaining=(await db.query("SELECT count(*)::integer AS count FROM join_requests WHERE status='pending'")).rows[0].count;
-   const result=rest.length?'':jobResult(job,remaining);
+   let result = "";
+   if (rest.length === 0) {
+    const {rows} = await db.query("SELECT count(*)::integer AS count FROM join_requests WHERE status='pending'");
+    result = jobResult(job, rows[0].count);
+   }
    await db.query(`UPDATE cf_approval_jobs SET pending_ids=$3::jsonb,counts=$4::jsonb,errors=$5::jsonb,status=$6,result=$7,
     lease_id=NULL,lease_until=NULL,not_before=now()+($8*interval '1 second'),updated_at=now() WHERE id=$1 AND lease_id=$2`,
     [id,lease,JSON.stringify(rest),JSON.stringify(job.counts),JSON.stringify(job.errors),rest.length?'running':'done',result,delay]);

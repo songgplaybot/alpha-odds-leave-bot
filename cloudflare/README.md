@@ -12,7 +12,7 @@ Set PUBLIC_URL to the active Worker origin to enable scheduled webhook recovery.
 
 ## Durable approvals
 
-One database-backed active job prevents overlapping bulk runs across bot commands and the Mini App. Each Queue delivery processes up to 32 approvals, stopping at the 50-request section boundary. Progress and successful request statuses commit together. Timestamp checks prevent an old approval from resolving a newer request. A 90-second lease prevents concurrent duplicate deliveries. Retrying is safe when Telegram accepted a request before a storage failure.
+One database-backed active job prevents overlapping bulk runs across bot commands and the Mini App. Each Queue delivery processes up to 32 approvals, with progress displayed in sections of 50. Progress and successful request statuses commit together. Timestamp checks prevent an old approval from resolving a newer request. A 90-second lease prevents concurrent duplicate deliveries. Retrying is safe when Telegram accepted a request before a storage failure.
 
 Rate limits delay subsequent chunks. Permanent failures stay in the pending list. A one-minute cron recovers jobs interrupted between saving progress and enqueueing the next chunk. This provides concurrency, not a promise of 1,000 approvals in seconds. Cloudflare's free execution, Queue-operation, and database-query quotas apply.
 

@@ -37,6 +37,7 @@ test('1000 approvals survive duplicate delivery, rate limits, and a failed stora
   while((await db.query('SELECT status FROM cf_approval_jobs WHERE id=$1',[job.id])).rows[0].status==='running'){
    assert.ok(++iterations<60);await processApproval(db,env,job.id,api);
   }
+  assert.equal(iterations,31);
   saved=(await db.query('SELECT * FROM cf_approval_jobs WHERE id=$1',[job.id])).rows[0];assert.equal(saved.counts.approved,1000);assert.equal(saved.pending_ids.length,0);assert.equal((await pending(db)).length,0);assert.equal(max,32);
   const doneCalls=apiCalls;assert.ok((await processApproval(db,env,job.id,api)).done);assert.equal(apiCalls,doneCalls);
   await db.query("INSERT INTO join_requests(user_id,status,requested_at) VALUES(1001,'pending','2026-11-04 00:00:00')");
