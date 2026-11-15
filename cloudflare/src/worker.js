@@ -76,7 +76,10 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   const chunk = job.pending_ids.slice(0, WORKERS);
   const {results,cooldown}=await approveChunk(chunk,api,env.CHANNEL_ID);
   const retries=results.filter(r=>r.result==='retry');const finished=results.filter(r=>r.result!=='retry');
-  for(const r of finished){job.counts[r.result]++;if(r.result==='failed'&&job.errors.length<3)job.errors.push(`User ${r.id}: ${r.error}`);}
+  for (const r of finished) {
+   job.counts[r.result] = (job.counts[r.result] ?? 0) + 1;
+   if (r.error && job.errors.length < 3) job.errors.push(`User ${r.id}: ${r.error}`);
+  }
   const rest=[...retries.map(({id,requested})=>({id,requested})),...job.pending_ids.slice(chunk.length)];
   // Repeated 429/network failures remain retryable and never disappear from the saved pending list.
   const delay=cooldown?Math.min(86400,cooldown+1):0;

@@ -13,10 +13,10 @@ export async function saveJoin(db,j){const u=j.from;await db.query(`INSERT INTO 
  VALUES($1,$2,$3,$4,$5,'pending',$6,NULL) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,last_name=excluded.last_name,
  user_chat_id=excluded.user_chat_id,status='pending',requested_at=excluded.requested_at,approved_at=NULL`,[u.id,u.username||null,u.first_name||null,u.last_name||null,j.user_chat_id||null,new Date(j.date*1000).toISOString().slice(0,19).replace('T',' ')]);}
 export async function markMember(db,id){await db.query("UPDATE join_requests SET status='approved',approved_at=$2 WHERE user_id=$1 AND status='pending'",[id,now()]);}
-export async function markResults(db,results){const changed=results.filter(r=>['approved','already_inside','resolved'].includes(r.result));if(!changed.length)return;
+export async function markResults(db,results){const changed=results.filter(r=>['approved','already_inside','resolved','terminal'].includes(r.result));if(!changed.length)return;
  await db.query(`UPDATE join_requests jr SET status=x.status,approved_at=CASE WHEN x.status='approved' THEN $2 ELSE jr.approved_at END
  FROM jsonb_to_recordset($1::jsonb) AS x(id bigint,status text,requested text)
- WHERE jr.user_id=x.id AND jr.status='pending' AND jr.requested_at=x.requested`,[JSON.stringify(changed.map(r=>({id:r.id,status:r.result==='resolved'?'resolved':'approved',requested:r.requested}))),now()]);}
+ WHERE jr.user_id=x.id AND jr.status='pending' AND jr.requested_at=x.requested`,[JSON.stringify(changed.map(r=>({id:r.id,status:r.result==='terminal'?'failed':r.result==='resolved'?'resolved':'approved',requested:r.requested}))),now()]);}
 export async function latestJob(db){return (await db.query('SELECT * FROM cf_approval_jobs ORDER BY created_at DESC LIMIT 1')).rows[0]||null;}
 export async function state(db,adminId){const [rows,job]=await Promise.all([pending(db),latestJob(db)]);const running=job?.status==='running';const processed=job?Object.values(job.counts).reduce((a,b)=>a+b,0):0;
  return {adminId:Number(adminId),total:rows.length,started:rows.filter(r=>r.started).length,requests:rows.map(({requested,first_name,last_name,...r})=>r),job:{running,result:job?.result||''},

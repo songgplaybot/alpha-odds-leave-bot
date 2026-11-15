@@ -29,6 +29,8 @@ export function classify(error) {
  const text=error.message.toLowerCase().replaceAll('_',' ');
  if(text.includes('already participant')||text.includes('already a participant'))return 'already_inside';
  if(error.code===400&&(text.includes('hide requester missing')||text.includes('join request not found')))return 'resolved';
+ if ((error.code === 400 && /\buser id invalid\b/.test(text)) ||
+     (error.code === 403 && /\buser is deactivated\b/.test(text))) return 'terminal';
  return 'failed';
 }
 export async function approveChunk(items,api,channelId) {
@@ -49,7 +51,7 @@ export function requestsMessage(rows) {
  return text+'\n\n✅ Started bot · ⏳ Not started\nResolved requests are removed during approval or when users join.';
 }
 export function jobResult(job,remaining) {
- const c=job.counts;let text=`✅ Approval finished.\n\nApproved now: ${c.approved}\nAlready inside: ${c.already_inside}\nNo longer pending: ${c.resolved}\nFailed (kept for retry): ${c.failed}\nSaved pending remaining: ${remaining}`;
+ const c=job.counts;let text=`✅ Approval finished.\n\nApproved now: ${c.approved}\nAlready inside: ${c.already_inside}\nNo longer pending: ${c.resolved}\nFailed (removed from pending): ${c.terminal ?? 0}\nFailed (kept for retry): ${c.failed}\nSaved pending remaining: ${remaining}`;
  if(job.errors.length)text+='\n\nFirst errors:\n'+job.errors.slice(0,3).join('\n');return text;
 }
 export function memberInside(m){return ['member','administrator','creator'].includes(m.status)||(m.status==='restricted'&&m.is_member);}
