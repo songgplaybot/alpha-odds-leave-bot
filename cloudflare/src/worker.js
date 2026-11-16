@@ -5,13 +5,22 @@ const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
 async function withDb(env,fn){const db=await connect(env);try{return await fn(db);}finally{await db.end();}}
 async function enqueue(env,id,delay=0){await env.APPROVAL_QUEUE.send({jobId:id},{delaySeconds:Math.min(86400,Math.max(0,Math.ceil(delay)))});}
-async function launch(db,env,mode,chatId,singleId){
+async function launch(db,env,mode,chatId,singleId,ctx){
  const rows=await pending(db);const selected=rows.filter(r=>(mode!=='started'||r.started)&&(!singleId||String(r.id)===String(singleId)));
- const {job,existing}=await createJob(db,selected,chatId);if(job)await enqueue(env,job.id);
+ const {job,existing}=await createJob(db,selected,chatId);
+ if (job && !existing) {
+  if (ctx && selected.length <= 8) {
+   // Start immediately. The delayed queue message recovers interruptions.
+   await enqueue(env, job.id, 8);
+   ctx.waitUntil(withDb(env, client => processApproval(client, env, job.id)).catch(report));
+  } else {
+   await enqueue(env, job.id);
+  }
+ }
  return !job?'No pending requests to approve.':existing?'⏳ Approval is already running. You can use Refresh to check progress.':`⏳ Starting approval for ${selected.length} pending request(s)…`;
 }
 async function optionalApi(api,method,payload){try{return await api(method,payload);}catch(e){if(e instanceof TelegramError&&(e.code===400||e.code===403))return null;throw e;}}
-async function handleUpdate(db,env,u,api){
+async function handleUpdate(db,env,u,api,ctx){
  const j=u.chat_join_request;
  if(j&&channelMatches(j.chat,env.CHANNEL_ID)){
   await saveJoin(db,j);
@@ -66,11 +75,11 @@ async function handleUpdate(db,env,u,api){
  if(['admin_accept_all','admin_accept_started','/accept_all','/accept_started','⚠️','✅','/accept'].includes(action)){
   const id=command==='/accept'?text.trim().split(/\s+/)[1]:null;
   if(command==='/accept'&&!/^\d+$/.test(id||'')){await send('Use it like this:\n/accept 123456789');return;}
-  const mode=action.includes('started')||command==='✅'?'started':'all';await send(await launch(db,env,mode,msg.chat.id,id));return;
+  const mode=action.includes('started')||command==='✅'?'started':'all';await send(await launch(db,env,mode,msg.chat.id,id,ctx));return;
  }
  if(['/panel','/menu','🏆'].includes(action)){await send('🏆 Alpha Odds Admin Panel\n\nYour buttons are active under your typing box.');await send('Admin quick buttons:',{reply_markup:inlineKeyboard});}
 }
-async function webhook(request,env){
+async function webhook(request,env,ctx){
  if(!equal(request.headers.get('X-Telegram-Bot-Api-Secret-Token'),await webhookSecret(env.BOT_TOKEN)))return json({error:'Forbidden'},403);
  if(Number(request.headers.get('content-length')||0)>1048576)return json({error:'Too large'},413);
  let u;try{const body=await request.text();if(body.length>1048576)throw Error();u=JSON.parse(body);if(!Number.isSafeInteger(u.update_id))throw Error();}catch{return json({error:'Invalid update'},400);}
@@ -79,7 +88,7 @@ async function webhook(request,env){
    ON CONFLICT(update_id) DO UPDATE SET lease_id=$2,lease_until=now()+interval '90 seconds'
    WHERE NOT cf_updates.done AND cf_updates.lease_until<now() RETURNING update_id`,[u.update_id,lease])).rows;
   if(!claim.length){const saved=(await db.query('SELECT done FROM cf_updates WHERE update_id=$1',[u.update_id])).rows[0];return saved?.done?new Response('ok'):json({error:'Update is processing; retry'},503);}
-  try{await handleUpdate(db,env,u,telegram(env.BOT_TOKEN));await db.query('UPDATE cf_updates SET done=true,lease_until=NULL WHERE update_id=$1 AND lease_id=$2',[u.update_id,lease]);return new Response('ok');}
+  try{await handleUpdate(db,env,u,telegram(env.BOT_TOKEN),ctx);await db.query('UPDATE cf_updates SET done=true,lease_until=NULL WHERE update_id=$1 AND lease_id=$2',[u.update_id,lease]);return new Response('ok');}
   catch(e){await db.query('UPDATE cf_updates SET lease_until=now() WHERE update_id=$1 AND lease_id=$2',[u.update_id,lease]);throw e;}
  });
 }
@@ -123,12 +132,12 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
  }catch(e){await db.query('UPDATE cf_approval_jobs SET lease_id=NULL,lease_until=NULL WHERE id=$1 AND lease_id=$2',[id,lease]);throw e;}
 }
 export default {
- async fetch(request,env){
+ async fetch(request,env,ctx){
   const url=new URL(request.url);
   try{
    if(url.pathname==='/'&&['GET','HEAD'].includes(request.method))return request.method==='HEAD'?new Response(null):json({status:'ok',hosting:'Cloudflare Workers'});
    if(url.pathname==='/admin'&&request.method==='GET')return new Response(adminHtml,{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'}});
-   if(url.pathname==='/telegram-webhook'&&request.method==='POST')return await webhook(request,env);
+   if(url.pathname==='/telegram-webhook'&&request.method==='POST')return await webhook(request,env,ctx);
    if(url.pathname.startsWith('/api/admin/')&&request.method==='POST'){
     if(!await validateAdmin(request.headers.get('X-Telegram-Init-Data'),env.BOT_TOKEN,env.ADMIN_ID))return json({error:'Forbidden'},403);
     const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed'].includes(action))return json({error:'Not found'},404);
@@ -136,7 +145,7 @@ export default {
      const cleared = await clearFailed(db);
      return json({...await state(db,env.ADMIN_ID), cleared});
     }
-    if(action!=='state')await launch(db,env,action,env.ADMIN_ID);return json(await state(db,env.ADMIN_ID));});
+    if(action!=='state')await launch(db,env,action,env.ADMIN_ID,null,ctx);return json(await state(db,env.ADMIN_ID));});
    }
    return json({error:'Not found'},404);
   }catch(e){report(e);return json({error:'The service is temporarily unavailable. Please retry.'},503);}
