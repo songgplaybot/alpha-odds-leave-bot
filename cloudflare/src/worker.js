@@ -1,5 +1,5 @@
 import adminHtml from '../../miniapp.html';
-import {connect,pending,saveUser,saveJoin,markMember,markResults,latestJob,state,createJob} from './db.js';
+import {connect,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
 import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
@@ -83,6 +83,11 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   const rest=[...retries.map(({id,requested})=>({id,requested})),...job.pending_ids.slice(chunk.length)];
   // Repeated 429/network failures remain retryable and never disappear from the saved pending list.
   const delay=cooldown?Math.min(86400,cooldown+1):0;
+  if (rest.length) {
+   await saveApprovalBatch(db, job, lease, rest, finished, delay);
+   await enqueue(env, id, delay);
+   return {done:false};
+  }
   await db.query('BEGIN');
   try{
    const owned=(await db.query('SELECT id FROM cf_approval_jobs WHERE id=$1 AND lease_id=$2 FOR UPDATE',[id,lease])).rowCount;if(!owned)throw Error('Approval lease changed');
@@ -96,7 +101,6 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
     lease_id=NULL,lease_until=NULL,not_before=now()+($8*interval '1 second'),updated_at=now() WHERE id=$1 AND lease_id=$2`,
     [id,lease,JSON.stringify(rest),JSON.stringify(job.counts),JSON.stringify(job.errors),rest.length?'running':'done',result,delay]);
    await db.query('COMMIT');
-   if(rest.length){await enqueue(env,id,delay);return {done:false};}
    if(job.chat_id)await optionalApi(api,'sendMessage',{chat_id:job.chat_id,text:result,reply_markup:replyKeyboard});
    return {done:true};
   }catch(e){await db.query('ROLLBACK');throw e;}
