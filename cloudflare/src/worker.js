@@ -41,6 +41,22 @@ async function handleUpdate(db,env,u,api){
  if(!q&&command==='/myid'){await send(`Your Telegram User ID is:\n\n${user.id}`);return;}
  if(!admin){if(command.startsWith('/'))await send('❌ You are not allowed to use this command.');return;}
  const action=q?.data||command;
+ if (!q && text === '🧹 Clear failed requests') {
+  await send('Remove failed requests from the bot’s Pending list?', {
+   reply_markup:{inline_keyboard:[[{text:'Clear failed requests',callback_data:'confirm_clear_failed'}]]}
+  });
+  return;
+ }
+ if (q && action === 'confirm_clear_failed') {
+  const cleared = await clearFailed(db);
+  await optionalApi(api,'editMessageText',{
+   chat_id:msg.chat.id,message_id:msg.message_id,
+   text:cleared ? `Cleared ${cleared} failed request(s) from Pending.` :
+    'No failed requests cleared. If an approval is running, wait for it to finish.'
+  });
+  return;
+ }
+
  if(action==='admin_requests'||['/requests','📌','🔄'].includes(action)){
   let message;try{message=requestsMessage(await pending(db));}catch{message='⚠️ The database is unavailable right now. Your request list could not be refreshed. Please try again.';}
   if(q)await optionalApi(api,'editMessageText',{chat_id:msg.chat.id,message_id:msg.message_id,text:message+'\n\nRefreshed: '+new Date().toISOString().slice(11,19)+' UTC',reply_markup:inlineKeyboard});
