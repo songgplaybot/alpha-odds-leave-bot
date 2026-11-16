@@ -1,5 +1,5 @@
 import adminHtml from '../../miniapp.html';
-import {connect,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
+import {connect,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
 import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
@@ -115,8 +115,12 @@ export default {
    if(url.pathname==='/telegram-webhook'&&request.method==='POST')return await webhook(request,env);
    if(url.pathname.startsWith('/api/admin/')&&request.method==='POST'){
     if(!await validateAdmin(request.headers.get('X-Telegram-Init-Data'),env.BOT_TOKEN,env.ADMIN_ID))return json({error:'Forbidden'},403);
-    const action=url.pathname.split('/').pop();if(!['state','all','started'].includes(action))return json({error:'Not found'},404);
-    return await withDb(env,async db=>{if(action!=='state')await launch(db,env,action,env.ADMIN_ID);return json(await state(db,env.ADMIN_ID));});
+    const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed'].includes(action))return json({error:'Not found'},404);
+    return await withDb(env,async db=>{if (action === 'clear-failed') {
+     const cleared = await clearFailed(db);
+     return json({...await state(db,env.ADMIN_ID), cleared});
+    }
+    if(action!=='state')await launch(db,env,action,env.ADMIN_ID);return json(await state(db,env.ADMIN_ID));});
    }
    return json({error:'Not found'},404);
   }catch(e){report(e);return json({error:'The service is temporarily unavailable. Please retry.'},503);}

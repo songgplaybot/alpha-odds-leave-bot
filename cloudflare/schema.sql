@@ -9,3 +9,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS cf_one_approval_job ON cf_approval_jobs(status
 CREATE TABLE IF NOT EXISTS cf_updates(update_id BIGINT PRIMARY KEY,done BOOLEAN NOT NULL DEFAULT false,lease_id UUID,lease_until TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 ALTER TABLE cf_approval_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cf_updates ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE join_requests ADD COLUMN IF NOT EXISTS approval_failed boolean NOT NULL DEFAULT false;
