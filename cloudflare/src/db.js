@@ -1,4 +1,5 @@
 import pg from 'pg';
+import {WORKERS} from './core.js';
 export async function connect(env) {
  const client=new pg.Client({connectionString:env.HYPERDRIVE?.connectionString||env.DATABASE_URL,connectionTimeoutMillis:10000,query_timeout:12000});
  await client.connect();return client;
@@ -49,7 +50,7 @@ export async function saveApprovalBatch(db, job, lease, remaining, results, dela
 export async function latestJob(db){return (await db.query('SELECT * FROM cf_approval_jobs ORDER BY created_at DESC LIMIT 1')).rows[0]||null;}
 export async function state(db,adminId){const [rows,job]=await Promise.all([pending(db),latestJob(db)]);const running=job?.status==='running';const processed=job?Object.values(job.counts).reduce((a,b)=>a+b,0):0;
  return {adminId:Number(adminId),total:rows.length,started:rows.filter(r=>r.started).length,requests:rows.map(({requested,first_name,last_name,approval_failed,...r})=>r),failedPending:rows.filter(r=>r.approval_failed).length,job:{running,result:job?.result||''},
- progress:{running,workers:32,section_size:50,total:job?.total||0,processed,section:job?Math.min(Math.floor(processed/50)+1,Math.ceil(job.total/50)):0,sections:job?Math.ceil(job.total/50):0}};
+ progress:{running,workers:WORKERS,section_size:50,total:job?.total||0,processed,section:job?Math.min(Math.floor(processed/50)+1,Math.ceil(job.total/50)):0,sections:job?Math.ceil(job.total/50):0}};
 }
 export async function createJob(db,selected,chatId){
  const active=(await db.query("SELECT * FROM cf_approval_jobs WHERE status='running' LIMIT 1")).rows[0];if(active)return {job:active,existing:true};

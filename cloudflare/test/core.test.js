@@ -16,16 +16,16 @@ test('Telegram authentication rejects other users, expired, tampered and duplica
 test('webhook secret remains compatible with existing Telegram configuration',async()=>{
  const {createHash}=await import('node:crypto');assert.equal(await webhookSecret(token),createHash('sha256').update('miniapp-webhook:'+token).digest('hex'));
 });
-test('32 approvals run concurrently; rate limited and transient calls remain retryable',async()=>{
- let active=0,max=0;const rows=Array.from({length:32},(_,id)=>({id,requested:'same'}));
+test('40 approvals run concurrently; rate limited and transient calls remain retryable',async()=>{
+ let active=0,max=0;const rows=Array.from({length:40},(_,id)=>({id,requested:'same'}));
  const api=async(_,r)=>{active++;max=Math.max(max,active);await new Promise(resolve=>setTimeout(resolve,1));active--;
  if(r.user_id===0)throw new TelegramError({error_code:429,parameters:{retry_after:12}});
  if(r.user_id===1)throw new TelegramError({error_code:400,description:'USER_ALREADY_PARTICIPANT'});
  if(r.user_id===2)throw new TelegramError({error_code:400,description:'HIDE_REQUESTER_MISSING'});
  if(r.user_id===3)throw new TelegramError({error_code:400,description:'USER_CHANNELS_TOO_MUCH'});
  if(r.user_id===4)throw Error('network');};
- const {results,cooldown}=await approveChunk(rows,api,-100);assert.equal(max,32);assert.equal(cooldown,12);
- assert.deepEqual(results.slice(0,5).map(r=>r.result),['retry','already_inside','resolved','failed','retry']);assert.equal(results.filter(r=>r.result==='approved').length,27);
+ const {results,cooldown}=await approveChunk(rows,api,-100);assert.equal(max,40);assert.equal(cooldown,12);
+ assert.deepEqual(results.slice(0,5).map(r=>r.result),['retry','already_inside','resolved','failed','retry']);assert.equal(results.filter(r=>r.result==='approved').length,35);
 });
 test('request list is bounded and member handling preserves restricted membership',()=>{
  const rows=Array.from({length:1000},(_,id)=>({id,name:'X'.repeat(200),started:id%2,username:null}));

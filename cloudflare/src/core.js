@@ -1,4 +1,4 @@
-export const WORKERS = 32;
+export const WORKERS = 40;
 export const SECTION_SIZE = 50;
 export const replyKeyboard = {keyboard:[['📌 Requests','✅ Accept Started'],['⚠️ Accept All','🆔 My ID'],['🔄 Refresh','🏆 Admin Panel'],['🧹 Clear failed requests']],resize_keyboard:true,is_persistent:true};
 export const inlineKeyboard = {inline_keyboard:[[{text:'📌 Requests',callback_data:'admin_requests'},{text:'✅ Accept Started',callback_data:'admin_accept_started'}],[{text:'⚠️ Accept All',callback_data:'admin_accept_all'}],[{text:'🆔 My ID',callback_data:'admin_myid'},{text:'🔄 Refresh',callback_data:'admin_requests'}]]};
