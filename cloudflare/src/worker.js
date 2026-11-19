@@ -50,19 +50,19 @@ async function handleUpdate(db,env,u,api,ctx){
  if(!q&&command==='/myid'){await send(`Your Telegram User ID is:\n\n${user.id}`);return;}
  if(!admin){if(command.startsWith('/'))await send('❌ You are not allowed to use this command.');return;}
  const action=q?.data||command;
- if (!q && text === '🧹 Clear failed requests') {
-  await send('Remove failed requests from the bot’s Pending list?', {
-   reply_markup:{inline_keyboard:[[{text:'Clear failed requests',callback_data:'confirm_clear_failed'}]]}
-  });
-  return;
- }
- if (q && action === 'confirm_clear_failed') {
+ if ((!q && text === '🧹 Clear failed requests') ||
+     (q && action === 'confirm_clear_failed')) {
   const cleared = await clearFailed(db);
-  await optionalApi(api,'editMessageText',{
-   chat_id:msg.chat.id,message_id:msg.message_id,
-   text:cleared ? `Cleared ${cleared} failed request(s) from Pending.` :
-    'No failed requests cleared. If an approval is running, wait for it to finish.'
-  });
+  const result = cleared
+   ? `Cleared ${cleared} failed request(s) from Pending.`
+   : 'No failed requests cleared. If an approval is running, wait for it to finish.';
+  if (q) {
+   await optionalApi(api, 'editMessageText', {
+    chat_id: msg.chat.id, message_id: msg.message_id, text: result
+   });
+  } else {
+   await send(result);
+  }
   return;
  }
 
