@@ -3,7 +3,9 @@ export const SECTION_SIZE = 50;
 export const replyKeyboard = {
  keyboard: [
   ['⚠️ Accept All', '🆔 My ID'],
-  ['🔄 Refresh', '🧹 Clear failed requests']
+  ['🔄 Refresh', '🧹 Clear failed requests'],
+  ['⏹ Cancel approvals'],
+  ['🟢 Auto-approval ON', '🔴 Auto-approval OFF']
  ],
  resize_keyboard: true,
  is_persistent: true
@@ -11,6 +13,7 @@ export const replyKeyboard = {
 export const inlineKeyboard = {
  inline_keyboard: [
   [{text:'⚠️ Accept All',callback_data:'admin_accept_all'}],
+  [{text:'⏹ Cancel approvals',callback_data:'cancel_approvals'}],
   [{text:'🆔 My ID',callback_data:'admin_myid'},{text:'🔄 Refresh',callback_data:'admin_requests'}]
  ]
 };

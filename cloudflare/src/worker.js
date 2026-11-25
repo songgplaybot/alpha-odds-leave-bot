@@ -1,5 +1,5 @@
 import adminHtml from '../../miniapp.html';
-import {connect,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
+import {connect,autoApprovalEnabled,setAutoApproval,cancelApprovals,createAutoJob,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
 import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
@@ -23,7 +23,8 @@ async function optionalApi(api,method,payload){try{return await api(method,paylo
 async function handleUpdate(db,env,u,api,ctx){
  const j=u.chat_join_request;
  if(j&&channelMatches(j.chat,env.CHANNEL_ID)){
-  await saveJoin(db,j);
+  const automatic = await saveJoin(db,j);
+  if (automatic) await env.APPROVAL_QUEUE.send({automatic:true});
   if(j.user_chat_id)await optionalApi(api,'sendMessage',{chat_id:j.user_chat_id,text:`Welcome to Alpha Odds, ${j.from.first_name}! 🏆🔥\n\nLet’s get you ready—tap Start Bot ✅ below to activate your bot access. It only takes a few seconds! 🚀`,reply_markup:{inline_keyboard:[[{text:'Start Bot ✅',url:`https://t.me/${env.BOT_USERNAME||'Alphaoddsleavebot'}?start=activate`}]]}});
   return;
  }
@@ -50,6 +51,17 @@ async function handleUpdate(db,env,u,api,ctx){
  if(!q&&command==='/myid'){await send(`Your Telegram User ID is:\n\n${user.id}`);return;}
  if(!admin){if(command.startsWith('/'))await send('❌ You are not allowed to use this command.');return;}
  const action=q?.data||command;
+ if (text === '⏹ Cancel approvals' || action === 'cancel_approvals') {
+  const stopped = await cancelApprovals(db);
+  await send(stopped ? '⏹ Stopping approvals. Calls already sent to Telegram may finish. Remaining requests stay pending.' : 'No approval is running.');
+  return;
+ }
+ if (text === '🟢 Auto-approval ON' || text === '🔴 Auto-approval OFF') {
+  const enabled = await setAutoApproval(db, text === '🟢 Auto-approval ON');
+  await send(enabled ? '🟢 Auto-approval is ON. New join requests will be accepted automatically.' : '🔴 Auto-approval is OFF. Use Accept All to approve requests. Any automatic approvals already sent may still finish.');
+  return;
+ }
+
  if ((!q && text === '🧹 Clear failed requests') ||
      (q && action === 'confirm_clear_failed')) {
   const cleared = await clearFailed(db);
@@ -98,6 +110,12 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
  if(!job){const current=(await db.query('SELECT status,lease_until,not_before FROM cf_approval_jobs WHERE id=$1',[id])).rows[0];
   if(current?.status==='running')return {retry:Math.max(2,Math.ceil((Math.max(new Date(current.lease_until||0),new Date(current.not_before||0))-Date.now())/1000))};return {done:true};}
  try{
+  if (job.cancel_requested || (job.auto_job && !await autoApprovalEnabled(db))) {
+   await cancelApprovals(db, job.auto_job, id);
+   await db.query("UPDATE cf_approval_jobs SET status='cancelled',lease_id=NULL,lease_until=NULL WHERE id=$1 AND lease_id=$2",[id,lease]);
+   await env.APPROVAL_QUEUE.send({automatic:true});
+   return {done:true};
+  }
   const chunk = job.pending_ids.slice(0, WORKERS);
   const {results,cooldown}=await approveChunk(chunk,api,env.CHANNEL_ID);
   const retries=results.filter(r=>r.result==='retry');const finished=results.filter(r=>r.result!=='retry');
@@ -109,23 +127,26 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   // Repeated 429/network failures remain retryable and never disappear from the saved pending list.
   const delay=cooldown?Math.min(86400,cooldown+1):0;
   if (rest.length) {
-   await saveApprovalBatch(db, job, lease, rest, finished, delay);
-   await enqueue(env, id, delay);
+   const status = await saveApprovalBatch(db, job, lease, rest, finished, delay);
+   if (status === 'running') await enqueue(env, id, delay);
+   else await env.APPROVAL_QUEUE.send({automatic:true});
    return {done:false};
   }
   await db.query('BEGIN');
   try{
-   const owned=(await db.query('SELECT id FROM cf_approval_jobs WHERE id=$1 AND lease_id=$2 FOR UPDATE',[id,lease])).rowCount;if(!owned)throw Error('Approval lease changed');
+   const owned=(await db.query('SELECT id,cancel_requested FROM cf_approval_jobs WHERE id=$1 AND lease_id=$2 FOR UPDATE',[id,lease])).rows[0];if(!owned)throw Error('Approval lease changed');
    await markResults(db,finished);
    let result = "";
    if (rest.length === 0) {
     const {rows} = await db.query("SELECT count(*)::integer AS count FROM join_requests WHERE status='pending'");
     result = jobResult(job, rows[0].count);
+    if (owned.cancel_requested) result = result.replace('✅ Approval finished.', '⏹ Approval cancelled.');
    }
    await db.query(`UPDATE cf_approval_jobs SET pending_ids=$3::jsonb,counts=$4::jsonb,errors=$5::jsonb,status=$6,result=$7,
     lease_id=NULL,lease_until=NULL,not_before=now()+($8*interval '1 second'),updated_at=now() WHERE id=$1 AND lease_id=$2`,
-    [id,lease,JSON.stringify(rest),JSON.stringify(job.counts),JSON.stringify(job.errors),rest.length?'running':'done',result,delay]);
+    [id,lease,JSON.stringify(rest),JSON.stringify(job.counts),JSON.stringify(job.errors),owned.cancel_requested?'cancelled':'done',result,delay]);
    await db.query('COMMIT');
+   await env.APPROVAL_QUEUE.send({automatic:true});
    if(job.chat_id)await optionalApi(api,'sendMessage',{chat_id:job.chat_id,text:result,reply_markup:replyKeyboard});
    return {done:true};
   }catch(e){await db.query('ROLLBACK');throw e;}
@@ -140,8 +161,17 @@ export default {
    if(url.pathname==='/telegram-webhook'&&request.method==='POST')return await webhook(request,env,ctx);
    if(url.pathname.startsWith('/api/admin/')&&request.method==='POST'){
     if(!await validateAdmin(request.headers.get('X-Telegram-Init-Data'),env.BOT_TOKEN,env.ADMIN_ID))return json({error:'Forbidden'},403);
-    const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed'].includes(action))return json({error:'Not found'},404);
-    return await withDb(env,async db=>{if (action === 'clear-failed') {
+    const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed','cancel','auto-on','auto-off'].includes(action))return json({error:'Not found'},404);
+    return await withDb(env,async db=>{
+    if (action === 'cancel') {
+     await cancelApprovals(db);
+     return json(await state(db,env.ADMIN_ID));
+    }
+    if (action === 'auto-on' || action === 'auto-off') {
+     await setAutoApproval(db,action === 'auto-on');
+     return json(await state(db,env.ADMIN_ID));
+    }
+    if (action === 'clear-failed') {
      const cleared = await clearFailed(db);
      return json({...await state(db,env.ADMIN_ID), cleared});
     }
@@ -150,7 +180,20 @@ export default {
    return json({error:'Not found'},404);
   }catch(e){report(e);return json({error:'The service is temporarily unavailable. Please retry.'},503);}
  },
- async queue(batch,env){for(const message of batch.messages){try{const result=await withDb(env,db=>processApproval(db,env,message.body.jobId));if(result.retry)message.retry({delaySeconds:Math.min(86400,result.retry)});else message.ack();}catch(e){report(e);message.retry({delaySeconds:15});}}},
+ async queue(batch,env) {
+  for (const message of batch.messages) {
+   try {
+    const result = await withDb(env,async db => {
+     let id = message.body.jobId;
+     if (message.body.automatic) id = (await createAutoJob(db))?.id;
+     if (!id) return {done:true};
+     return processApproval(db,env,id);
+    });
+    if (result.retry) message.retry({delaySeconds:Math.min(86400,result.retry)});
+    else message.ack();
+   } catch(error) {report(error);message.retry({delaySeconds:15});}
+  }
+ },
  async scheduled(event,env,ctx){
   if(env.PUBLIC_URL)ctx.waitUntil((async()=>{
    const api=telegram(env.BOT_TOKEN),info=await api('getWebhookInfo',{});
@@ -161,8 +204,12 @@ export default {
   // Recover a saved job even if the process stopped between committing and sending its next queue message.
   const active=(await db.query("SELECT id FROM cf_approval_jobs WHERE status='running' AND (lease_until IS NULL OR lease_until<now()) AND (not_before IS NULL OR not_before<=now())")).rows;
   for(const j of active)await enqueue(env,j.id);
+  const automaticPending = await db.query(`SELECT 1 FROM join_requests
+   WHERE status='pending' AND auto_eligible AND NOT approval_failed
+    AND (SELECT auto_approval FROM cf_bot_settings WHERE id=1) LIMIT 1`);
+  if (automaticPending.rowCount) await env.APPROVAL_QUEUE.send({automatic:true});
   await db.query("DELETE FROM cf_updates WHERE done AND created_at<now()-interval '7 days'");
  }).catch(report));}
 };
 
-export {TelegramError};
+export {TelegramError,handleUpdate};

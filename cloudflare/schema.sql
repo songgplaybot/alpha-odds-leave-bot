@@ -11,3 +11,14 @@ ALTER TABLE cf_approval_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cf_updates ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE join_requests ADD COLUMN IF NOT EXISTS approval_failed boolean NOT NULL DEFAULT false;
+
+ALTER TABLE cf_approval_jobs ADD COLUMN IF NOT EXISTS cancel_requested boolean NOT NULL DEFAULT false;
+ALTER TABLE cf_approval_jobs ADD COLUMN IF NOT EXISTS auto_job boolean NOT NULL DEFAULT false;
+ALTER TABLE join_requests ADD COLUMN IF NOT EXISTS auto_eligible boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS cf_bot_settings (
+ id integer PRIMARY KEY CHECK (id=1), auto_approval boolean NOT NULL DEFAULT false);
+INSERT INTO cf_bot_settings(id) VALUES(1) ON CONFLICT DO NOTHING;
+ALTER TABLE cf_bot_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE INDEX IF NOT EXISTS cf_auto_pending_idx ON join_requests(requested_at,user_id)
+ WHERE auto_eligible AND status='pending';
