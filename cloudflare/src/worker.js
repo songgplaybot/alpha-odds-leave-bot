@@ -1,5 +1,5 @@
 import adminHtml from '../../miniapp.html';
-import {connect,autoApprovalEnabled,setAutoApproval,cancelApprovals,createAutoJob,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
+import {connect,cancellationSummary,autoApprovalEnabled,setAutoApproval,cancelApprovals,createAutoJob,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
 import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
@@ -53,7 +53,8 @@ async function handleUpdate(db,env,u,api,ctx){
  const action=q?.data||command;
  if (text === '⏹ Cancel approvals' || action === 'cancel_approvals') {
   const stopped = await cancelApprovals(db);
-  await send(stopped ? '⏹ Stopping approvals. Calls already sent to Telegram may finish. Remaining requests stay pending.' : 'No approval is running.');
+  const summary = stopped ? await cancellationSummary(db) : null;
+  await send(summary?.result || 'No approval is running.');
   return;
  }
  if (text === '🟢 Auto-approval ON' || text === '🔴 Auto-approval OFF') {
@@ -113,6 +114,8 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   if (job.cancel_requested || (job.auto_job && !await autoApprovalEnabled(db))) {
    await cancelApprovals(db, job.auto_job, id);
    await db.query("UPDATE cf_approval_jobs SET status='cancelled',lease_id=NULL,lease_until=NULL WHERE id=$1 AND lease_id=$2",[id,lease]);
+   const summary = await cancellationSummary(db,id);
+   if (summary) await optionalApi(api,'sendMessage',{chat_id:job.chat_id||env.ADMIN_ID,text:summary.result,reply_markup:replyKeyboard});
    await env.APPROVAL_QUEUE.send({automatic:true});
    return {done:true};
   }
@@ -129,7 +132,11 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
   if (rest.length) {
    const status = await saveApprovalBatch(db, job, lease, rest, finished, delay);
    if (status === 'running') await enqueue(env, id, delay);
-   else await env.APPROVAL_QUEUE.send({automatic:true});
+   else {
+    const summary = await cancellationSummary(db,id);
+    if (summary) await optionalApi(api,'sendMessage',{chat_id:job.chat_id||env.ADMIN_ID,text:summary.result,reply_markup:replyKeyboard});
+    await env.APPROVAL_QUEUE.send({automatic:true});
+   }
    return {done:false};
   }
   await db.query('BEGIN');
@@ -147,7 +154,7 @@ export async function processApproval(db,env,id,api=telegram(env.BOT_TOKEN)){
     [id,lease,JSON.stringify(rest),JSON.stringify(job.counts),JSON.stringify(job.errors),owned.cancel_requested?'cancelled':'done',result,delay]);
    await db.query('COMMIT');
    await env.APPROVAL_QUEUE.send({automatic:true});
-   if(job.chat_id)await optionalApi(api,'sendMessage',{chat_id:job.chat_id,text:result,reply_markup:replyKeyboard});
+   if(job.chat_id || owned.cancel_requested)await optionalApi(api,'sendMessage',{chat_id:job.chat_id||env.ADMIN_ID,text:result,reply_markup:replyKeyboard});
    return {done:true};
   }catch(e){await db.query('ROLLBACK');throw e;}
  }catch(e){await db.query('UPDATE cf_approval_jobs SET lease_id=NULL,lease_until=NULL WHERE id=$1 AND lease_id=$2',[id,lease]);throw e;}
@@ -165,6 +172,7 @@ export default {
     return await withDb(env,async db=>{
     if (action === 'cancel') {
      await cancelApprovals(db);
+     await cancellationSummary(db);
      return json(await state(db,env.ADMIN_ID));
     }
     if (action === 'auto-on' || action === 'auto-off') {

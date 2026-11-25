@@ -1,5 +1,5 @@
 import pg from 'pg';
-import {WORKERS} from './core.js';
+import {WORKERS,jobResult} from './core.js';
 export async function connect(env) {
  const client=new pg.Client({connectionString:env.HYPERDRIVE?.connectionString||env.DATABASE_URL,connectionTimeoutMillis:10000,query_timeout:12000});
  await client.connect();return client;
@@ -109,4 +109,19 @@ export async function createAutoJob(db) {
  if (!selected.length) return null;
  const created = await createJob(db,selected,null,true);
  return created.existing ? null : created.job;
+}
+
+export async function cancellationSummary(db, jobId=null) {
+ const {rows} = await db.query(`SELECT *,
+  (SELECT count(*)::integer FROM join_requests WHERE status='pending') AS remaining
+  FROM cf_approval_jobs WHERE cancel_requested AND ($1::uuid IS NULL OR id=$1)
+  ORDER BY updated_at DESC LIMIT 1`,[jobId]);
+ const job = rows[0];
+ if (!job) return null;
+ const stopping = job.status === 'running';
+ const title = stopping ? '⏹ Stopping approvals.' : '⏹ Approval cancelled.';
+ let result = jobResult(job,job.remaining).replace('✅ Approval finished.',title);
+ if (stopping) result += '\n\nApprovals already sent may finish. Final counts will follow.';
+ else await db.query("UPDATE cf_approval_jobs SET result=$2 WHERE id=$1 AND status='cancelled'",[job.id,result]);
+ return {job,result};
 }

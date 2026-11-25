@@ -71,7 +71,9 @@ test('cancellation preserves pending requests and auto-approval applies only to 
    SELECT n,'pending','fixture' FROM generate_series(2,100) n`);
   const manual = (await createJob(db,await pending(db),null)).job;
   let calls = 0;
-  const api = async () => {
+  const cancellationReplies = [];
+  const api = async (method, body) => {
+   if (method === 'sendMessage') {cancellationReplies.push(body.text);return true;}
    calls++;
    if (calls === 1) await command('⏹ Cancel approvals');
    return true;
@@ -82,6 +84,8 @@ test('cancellation preserves pending requests and auto-approval applies only to 
   const stopped=(await db.query('SELECT * FROM cf_approval_jobs WHERE id=$1',[manual.id])).rows[0];
   assert.equal(stopped.status,'cancelled');
   assert.equal(stopped.counts.approved,40);
+  assert.ok(cancellationReplies.some(text=>text.includes('Approved now: 40') && text.includes('Saved pending remaining: 60')));
+  assert.match(stopped.result,/Approved now: 40/);
   await processApproval(db,env,manual.id,api);
   assert.equal(calls,40);
   assert.equal(queued.some(body=>body.jobId===manual.id),false);
@@ -120,7 +124,8 @@ test('cancellation preserves pending requests and auto-approval applies only to 
   const small=(await createJob(db,(await pending(db)).slice(0,6),null)).job;
   const remainingBefore=(await pending(db)).length;
   let smallCalls=0;
-  await processApproval(db,env,small.id,async()=>{
+  await processApproval(db,env,small.id,async(method)=>{
+   if (method === 'sendMessage') return true;
    if (++smallCalls===1) await command('⏹ Cancel approvals');
    return true;
   });
