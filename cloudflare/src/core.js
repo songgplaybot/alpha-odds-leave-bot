@@ -4,7 +4,7 @@ export const replyKeyboard = {
  keyboard: [
   ['⚠️ Accept All', '🆔 My ID'],
   ['🔄 Refresh', '🧹 Clear failed requests'],
-  ['⏹ Cancel approvals'],
+  ['⏹ Cancel approvals', '📊 Invite-link stats'],
   ['🟢 Auto-approval ON', '🔴 Auto-approval OFF']
  ],
  resize_keyboard: true,
@@ -71,3 +71,22 @@ export function jobResult(job,remaining) {
 }
 export function memberInside(m){return ['member','administrator','creator'].includes(m.status)||(m.status==='restricted'&&m.is_member);}
 export function channelMatches(chat,channel){return String(chat.id)===String(channel)||(chat.username&&('@'+chat.username).toLowerCase()===String(channel).toLowerCase());}
+
+export function inviteSource(link) {
+ const url = link?.invite_link;
+ if (typeof url === 'string' && /^https:\/\/t\.me\//.test(url) && !url.includes('…') && !url.includes('...')) {
+  return {key:url,url,name:link.name||null,kind:'known'};
+ }
+ return {key:link?'hidden':'unknown',url:null,name:null,kind:link?'hidden':'unknown'};
+}
+
+export function inviteStatsMessage(stats) {
+ let text = `📊 Invite-link stats\n\nTracked join requests: ${stats.totalRequests}\n`;
+ for (const [index,link] of stats.links.slice(0,10).entries()) {
+  text += `\n${index+1}. ${link.name||'Unnamed link'}\n${link.url}\n${link.requests} requests · ${link.people} unique people · ${link.last7Days} in the last 7 days\n`;
+ }
+ if (!stats.links.length) text += '\nNo identifiable invite-link requests recorded yet.\n';
+ text += `\nHidden-link requests: ${stats.hiddenRequests}\nRequests without link details: ${stats.unknownRequests}`;
+ text += '\n\nTracking starts with new requests. Telegram may hide links made by other admins. Create a named, trackable link with /newlink Instagram (or another campaign name).';
+ return text;
+}

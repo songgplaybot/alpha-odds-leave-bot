@@ -1,6 +1,6 @@
 import adminHtml from '../../miniapp.html';
-import {connect,cancellationSummary,autoApprovalEnabled,setAutoApproval,cancelApprovals,createAutoJob,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
-import {WORKERS,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
+import {connect,recordInviteRequest,inviteStats,createdInvite,saveCreatedInvite,cancellationSummary,autoApprovalEnabled,setAutoApproval,cancelApprovals,createAutoJob,clearFailed,pending,saveUser,saveJoin,markMember,markResults,saveApprovalBatch,latestJob,state,createJob} from './db.js';
+import {WORKERS,inviteStatsMessage,replyKeyboard,inlineKeyboard,validateAdmin,webhookSecret,equal,telegram,TelegramError,approveChunk,requestsMessage,jobResult,memberInside,channelMatches} from './core.js';
 const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
 const report=e=>console.error('Bot operation failed:',e instanceof TelegramError?'Telegram '+e.code:e?.code||e?.name||'Error');
 async function withDb(env,fn){const db=await connect(env);try{return await fn(db);}finally{await db.end();}}
@@ -24,6 +24,7 @@ async function handleUpdate(db,env,u,api,ctx){
  const j=u.chat_join_request;
  if(j&&channelMatches(j.chat,env.CHANNEL_ID)){
   const automatic = await saveJoin(db,j);
+  await recordInviteRequest(db,j,u.update_id);
   if (automatic) await env.APPROVAL_QUEUE.send({automatic:true});
   if(j.user_chat_id)await optionalApi(api,'sendMessage',{chat_id:j.user_chat_id,text:`Welcome to Alpha Odds, ${j.from.first_name}! 🏆🔥\n\nLet’s get you ready—tap Start Bot ✅ below to activate your bot access. It only takes a few seconds! 🚀`,reply_markup:{inline_keyboard:[[{text:'Start Bot ✅',url:`https://t.me/${env.BOT_USERNAME||'Alphaoddsleavebot'}?start=activate`}]]}});
   return;
@@ -51,6 +52,26 @@ async function handleUpdate(db,env,u,api,ctx){
  if(!q&&command==='/myid'){await send(`Your Telegram User ID is:\n\n${user.id}`);return;}
  if(!admin){if(command.startsWith('/'))await send('❌ You are not allowed to use this command.');return;}
  const action=q?.data||command;
+ if (text === '📊 Invite-link stats' || command === '/link_stats') {
+  await send(inviteStatsMessage(await inviteStats(db)),{link_preview_options:{is_disabled:true}});
+  return;
+ }
+ if (!q && command === '/newlink') {
+  const name = text.trim().split(/\s+/).slice(1).join(' ');
+  if (!name || [...name].length > 32) {
+   await send('Use /newlink followed by a campaign name of 1–32 characters. Example: /newlink Instagram');
+   return;
+  }
+  let url = await createdInvite(db,u.update_id);
+  if (!url) {
+   const link = await api('createChatInviteLink',{chat_id:env.CHANNEL_ID,name,creates_join_request:true});
+   await saveCreatedInvite(db,link,u.update_id);
+   url = link.invite_link;
+  }
+  await send(`🔗 ${name}\n${url}\n\nShare this link for the campaign. View its requests with Invite-link stats.`,{link_preview_options:{is_disabled:true}});
+  return;
+ }
+
  if (text === '⏹ Cancel approvals' || action === 'cancel_approvals') {
   const stopped = await cancelApprovals(db);
   const summary = stopped ? await cancellationSummary(db) : null;
@@ -168,8 +189,9 @@ export default {
    if(url.pathname==='/telegram-webhook'&&request.method==='POST')return await webhook(request,env,ctx);
    if(url.pathname.startsWith('/api/admin/')&&request.method==='POST'){
     if(!await validateAdmin(request.headers.get('X-Telegram-Init-Data'),env.BOT_TOKEN,env.ADMIN_ID))return json({error:'Forbidden'},403);
-    const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed','cancel','auto-on','auto-off'].includes(action))return json({error:'Not found'},404);
+    const action=url.pathname.split('/').pop();if(!['state','all','started','clear-failed','cancel','auto-on','auto-off','invite-stats'].includes(action))return json({error:'Not found'},404);
     return await withDb(env,async db=>{
+    if (action === 'invite-stats') return json(await inviteStats(db));
     if (action === 'cancel') {
      await cancelApprovals(db);
      await cancellationSummary(db);

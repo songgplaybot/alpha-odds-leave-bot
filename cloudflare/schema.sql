@@ -22,3 +22,14 @@ ALTER TABLE cf_bot_settings ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX IF NOT EXISTS cf_auto_pending_idx ON join_requests(requested_at,user_id)
  WHERE auto_eligible AND status='pending';
+
+CREATE TABLE IF NOT EXISTS cf_invite_links (
+ link_key text PRIMARY KEY, url text, name text, source_kind text NOT NULL,
+ creation_update_id bigint UNIQUE, first_seen timestamptz NOT NULL DEFAULT now(),
+ last_seen timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS cf_invite_requests (
+ update_id bigint PRIMARY KEY, link_key text NOT NULL REFERENCES cf_invite_links(link_key),
+ user_id bigint NOT NULL, requested_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS cf_invite_requests_link_idx ON cf_invite_requests(link_key,requested_at);
+ALTER TABLE cf_invite_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cf_invite_requests ENABLE ROW LEVEL SECURITY;

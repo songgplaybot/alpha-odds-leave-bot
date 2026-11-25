@@ -11,7 +11,7 @@ const {default:worker,processApproval,TelegramError,handleUpdate}=await import('
 test('HTTP endpoints reject unsigned admin and webhook requests before reaching the database',async()=>{
  const env={BOT_TOKEN:'test-token',ADMIN_ID:123};
  assert.equal((await worker.fetch(new Request('https://bot.test/',{method:'HEAD'}),env)).status,200);
- for (const action of ['all','cancel','auto-on','auto-off']) {
+ for (const action of ['all','cancel','auto-on','auto-off','invite-stats']) {
   assert.equal((await worker.fetch(new Request('https://bot.test/api/admin/'+action,{method:'POST'}),env)).status,403);
  }
  assert.equal((await worker.fetch(new Request('https://bot.test/telegram-webhook',{method:'POST',body:'{}'}),env)).status,403);
@@ -134,4 +134,53 @@ test('cancellation preserves pending requests and auto-approval applies only to 
  } finally {
   await db.end();
  }
+});
+
+test('invite rankings count requests once, distinguish people, and separate hidden links', {skip:!process.env.TEST_DATABASE_URL}, async () => {
+ const {recordInviteRequest,inviteStats} = await import('../src/db.js');
+ const db=new pg.Client({connectionString:process.env.TEST_DATABASE_URL});
+ await db.connect();
+ try {
+  for (const name of ['users','join_requests','cf_bot_settings','cf_invite_links','cf_invite_requests']) {
+   await db.query(`CREATE TEMP TABLE ${name} (LIKE public.${name} INCLUDING ALL)`);
+  }
+  await db.query('INSERT INTO cf_bot_settings(id) VALUES(1)');
+  const env={BOT_TOKEN:'test',ADMIN_ID:999,CHANNEL_ID:-100,APPROVAL_QUEUE:{send:async()=>assert.fail('Auto-approval should be off')}};
+  const replies=[];let created=0;
+  const api=async(method,payload)=>{
+   if(method==='createChatInviteLink'){
+    created++;
+    return {invite_link:'https://t.me/+new-campaign',name:payload.name};
+   }
+   if(method==='sendMessage')replies.push(payload.text);
+   return true;
+  };
+  const current=Math.floor(Date.now()/1000);
+  const linkA={invite_link:'https://t.me/+campaign-A',name:'Instagram'};
+  const linkB={invite_link:'https://t.me/+campaign-B',name:'Partner'};
+  const update=(id,user,link,date=current)=>({update_id:id,chat_join_request:{chat:{id:-100},from:{id:user,first_name:'Fixture'},date,invite_link:link}});
+  const first=update(1,1,linkA);
+  await handleUpdate(db,env,first,api);
+  await handleUpdate(db,env,update(2,2,linkB),api);
+  await handleUpdate(db,env,update(3,3,linkA),api);
+  await recordInviteRequest(db,update(4,1,linkA,current-8*86400).chat_join_request,4);
+  await recordInviteRequest(db,first.chat_join_request,first.update_id);
+  await handleUpdate(db,env,update(5,5,{invite_link:'https://t.me/+…',name:'Hidden'}),api);
+  await handleUpdate(db,env,update(6,6,undefined),api);
+  const stats=await inviteStats(db);
+  assert.equal(stats.totalRequests,6);
+  assert.equal(stats.hiddenRequests,1);
+  assert.equal(stats.unknownRequests,1);
+  assert.deepEqual(stats.links.map(link=>[link.name,link.requests,link.people,link.last7Days]),[['Instagram',3,2,2],['Partner',1,1,1]]);
+  const command=(text,id=999)=>({update_id:77,message:{text,from:{id},chat:{id,type:'private'}}});
+  await handleUpdate(db,env,command('/newlink YouTube'),api);
+  await handleUpdate(db,env,command('/newlink YouTube'),api);
+  assert.equal(created,1);
+  assert.equal((await inviteStats(db)).totalLinks,3);
+  await handleUpdate(db,env,command('📊 Invite-link stats'),api);
+  assert.ok(replies.at(-1).includes('Tracked join requests: 6'));
+  assert.ok(replies.at(-1).includes('Instagram'));
+  await handleUpdate(db,env,command('/link_stats',998),api);
+  assert.ok(replies.at(-1).includes('not allowed'));
+ } finally {await db.end();}
 });

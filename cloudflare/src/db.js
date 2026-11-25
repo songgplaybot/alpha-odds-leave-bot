@@ -1,5 +1,5 @@
 import pg from 'pg';
-import {WORKERS,jobResult} from './core.js';
+import {WORKERS,jobResult,inviteSource} from './core.js';
 export async function connect(env) {
  const client=new pg.Client({connectionString:env.HYPERDRIVE?.connectionString||env.DATABASE_URL,connectionTimeoutMillis:10000,query_timeout:12000});
  await client.connect();return client;
@@ -124,4 +124,42 @@ export async function cancellationSummary(db, jobId=null) {
  if (stopping) result += '\n\nApprovals already sent may finish. Final counts will follow.';
  else await db.query("UPDATE cf_approval_jobs SET result=$2 WHERE id=$1 AND status='cancelled'",[job.id,result]);
  return {job,result};
+}
+
+export async function recordInviteRequest(db, request, updateId) {
+ const source = inviteSource(request.invite_link);
+ await db.query(`WITH link AS (
+  INSERT INTO cf_invite_links(link_key,url,name,source_kind) VALUES($1,$2,$3,$4)
+  ON CONFLICT(link_key) DO UPDATE SET name=COALESCE(excluded.name,cf_invite_links.name),last_seen=now()
+  RETURNING link_key
+ )
+ INSERT INTO cf_invite_requests(update_id,link_key,user_id,requested_at)
+ SELECT $5,link_key,$6,to_timestamp($7) FROM link
+ ON CONFLICT(update_id) DO NOTHING`,[source.key,source.url,source.name,source.kind,updateId,request.from.id,request.date]);
+}
+
+export async function inviteStats(db) {
+ const {rows} = await db.query(`SELECT link.link_key,link.url,link.name,link.source_kind,
+  count(event.update_id)::integer AS requests,
+  count(DISTINCT event.user_id)::integer AS people,
+  count(event.update_id) FILTER (WHERE event.requested_at>=now()-interval '7 days')::integer AS last7days
+  FROM cf_invite_links link LEFT JOIN cf_invite_requests event USING(link_key)
+  GROUP BY link.link_key ORDER BY requests DESC,link.link_key`);
+ const known = rows.filter(row=>row.source_kind==='known');
+ return {
+  totalRequests:rows.reduce((sum,row)=>sum+row.requests,0),
+  totalLinks:known.length,
+  links:known.slice(0,20).map(row=>({url:row.url,name:row.name,requests:row.requests,people:row.people,last7Days:row.last7days})),
+  hiddenRequests:rows.filter(row=>row.source_kind==='hidden').reduce((sum,row)=>sum+row.requests,0),
+  unknownRequests:rows.filter(row=>row.source_kind==='unknown').reduce((sum,row)=>sum+row.requests,0)
+ };
+}
+
+export async function createdInvite(db, updateId) {
+ return (await db.query('SELECT url FROM cf_invite_links WHERE creation_update_id=$1',[updateId])).rows[0]?.url;
+}
+
+export async function saveCreatedInvite(db, link, updateId) {
+ await db.query(`INSERT INTO cf_invite_links(link_key,url,name,source_kind,creation_update_id)
+  VALUES($1,$1,$2,'known',$3) ON CONFLICT(creation_update_id) DO NOTHING`,[link.invite_link,link.name,updateId]);
 }
